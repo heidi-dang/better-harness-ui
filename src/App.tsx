@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import BetterHarnessPage from "./features/better-harness/pages/better-harness-page";
 import { parseHarnessRoute, buildHarnessRoute } from "./features/better-harness/utils/harness-route";
-import { Command, Server, FolderGit2, Sparkles, RefreshCw, Layers } from "lucide-react";
+import { Command, Server, FolderGit2, Sparkles, RefreshCw, Layers, Menu } from "lucide-react";
 
 export default function App() {
   const [currentPath, setCurrentPath] = useState(() =>
@@ -43,44 +43,77 @@ export default function App() {
   };
 
   return (
-    <div className="relative min-h-screen bg-[#0e0f12]">
+    <div className="relative min-h-screen bg-[#0e0f12] overflow-x-hidden">
       {/* Top OpenCode App Navigation Header */}
-      <nav className="bg-[#121418] border-b border-[#22252c] px-4 py-2 flex items-center justify-between text-xs text-slate-300">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5 font-bold text-white text-sm">
-            <span className="w-2.5 h-2.5 rounded-full bg-sky-500 animate-pulse" />
-            <span>OpenCode Web UI</span>
+      <nav className="bg-[#121418] border-b border-[#22252c] px-3 sm:px-4 py-2 text-xs text-slate-300">
+        {/* Mobile: Two-row stacked layout below 640px */}
+        <div className="flex flex-col sm:hidden gap-1.5 min-w-0">
+          {/* Row 1: Identity + Command Palette trigger */}
+          <div className="flex items-center justify-between min-w-0">
+            <div className="flex items-center gap-1.5 font-bold text-white text-sm min-w-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-sky-500 animate-pulse shrink-0" />
+              <span className="truncate">OpenCode Web UI</span>
+            </div>
+            <button
+              onClick={() => setShowCommandPalette(true)}
+              className="shrink-0 ml-2 p-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg border border-slate-700 transition-colors flex items-center justify-center min-h-[44px] min-w-[44px]"
+              aria-label="Open command palette"
+            >
+              <Command className="w-4 h-4" />
+            </button>
           </div>
-
-          <span className="text-slate-600">/</span>
-
-          <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
-            <Server className="w-3.5 h-3.5 text-sky-400" />
-            <span className="font-mono text-slate-200">{serverKey}</span>
-          </div>
-
-          <span className="text-slate-600">/</span>
-
-          <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800">
-            <FolderGit2 className="w-3.5 h-3.5 text-purple-400" />
-            <span className="font-mono text-slate-200 truncate max-w-[200px]">
-              {projectDir}
-            </span>
+          {/* Row 2: Server + Project path */}
+          <div className="flex items-center gap-1 min-w-0 overflow-hidden">
+            <div className="flex items-center gap-1 text-slate-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 min-w-0 max-w-[45%]">
+              <Server className="w-3 h-3 text-sky-400 shrink-0" />
+              <span className="font-mono text-slate-200 truncate block min-w-0">{serverKey}</span>
+            </div>
+            <span className="text-slate-600 shrink-0">/</span>
+            <div className="flex items-center gap-1 text-slate-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 min-w-0 max-w-[50%]">
+              <FolderGit2 className="w-3 h-3 text-purple-400 shrink-0" />
+              <span className="font-mono text-slate-200 truncate block min-w-0">{projectDir}</span>
+            </div>
           </div>
         </div>
 
-        <div className="flex items-center gap-2">
-          {/* Command Palette Trigger */}
-          <button
-            onClick={() => setShowCommandPalette(true)}
-            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded border border-slate-700 transition-colors flex items-center gap-1.5 min-h-[32px]"
-          >
-            <Command className="w-3.5 h-3.5 text-slate-400" />
-            <span>Command Palette</span>
-            <kbd className="hidden sm:inline-block bg-slate-900 text-[10px] text-slate-400 px-1.5 py-0.5 rounded font-mono border border-slate-800 ml-1">
-              ⌘K
-            </kbd>
-          </button>
+        {/* Desktop: Single row layout above 640px */}
+        <div className="hidden sm:flex items-center justify-between min-w-0">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className="flex items-center gap-1.5 font-bold text-white text-sm shrink-0">
+              <span className="w-2.5 h-2.5 rounded-full bg-sky-500 animate-pulse" />
+              <span>OpenCode Web UI</span>
+            </div>
+
+            <span className="text-slate-600 shrink-0">/</span>
+
+            <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 max-w-[180px]">
+              <Server className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+              <span className="font-mono text-slate-200 truncate block min-w-0">{serverKey}</span>
+            </div>
+
+            <span className="text-slate-600 shrink-0">/</span>
+
+            <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 max-w-[240px]">
+              <FolderGit2 className="w-3.5 h-3.5 text-purple-400 shrink-0" />
+              <span className="font-mono text-slate-200 truncate block min-w-0">
+                {projectDir}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            {/* Command Palette Trigger */}
+            <button
+              onClick={() => setShowCommandPalette(true)}
+              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded border border-slate-700 transition-colors flex items-center gap-1.5 min-h-[44px]"
+            >
+              <Command className="w-3.5 h-3.5 text-slate-400" />
+              <span>Command Palette</span>
+              <kbd className="bg-slate-900 text-[10px] text-slate-400 px-1.5 py-0.5 rounded font-mono border border-slate-800 ml-1">
+                ⌘K
+              </kbd>
+            </button>
+          </div>
         </div>
       </nav>
 
@@ -94,6 +127,7 @@ export default function App() {
           aria-modal="true"
           aria-label="Command Palette"
           className="fixed inset-0 z-50 bg-black/70 backdrop-blur-xs flex items-start justify-center pt-20 p-4"
+          style={{ paddingTop: "max(5rem, env(safe-area-inset-top, 0px))", paddingRight: "max(1rem, env(safe-area-inset-right, 0px))", paddingBottom: "max(1rem, env(safe-area-inset-bottom, 0px))", paddingLeft: "max(1rem, env(safe-area-inset-left, 0px))" }}
           onClick={() => setShowCommandPalette(false)}
         >
           <div

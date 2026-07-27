@@ -45,12 +45,12 @@ export function HarnessFindingCard({
         <div className="flex items-center gap-2">
           {onToggleCheck && (
             <label
-              className="inline-flex items-center cursor-pointer p-1 -m-1"
+              className="inline-flex items-center justify-center cursor-pointer min-h-[44px] min-w-[44px] -ml-1"
               title="Select finding for batch action"
+              aria-label={`Select finding ${finding.id} for batch action`}
             >
               <input
                 type="checkbox"
-                aria-label={`Select finding ${finding.id} for batch action`}
                 checked={!!isChecked}
                 onChange={() => {
                   onToggleCheck(finding.id);

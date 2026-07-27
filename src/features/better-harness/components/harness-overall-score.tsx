@@ -17,7 +17,7 @@ export function HarnessOverallScore() {
     <div className="bg-[var(--v2-bg-surface-raised,#16181d)] border border-[var(--v2-border-subtle,#262930)] rounded-xl p-3 sm:p-5 shadow-sm">
       <div className="grid grid-cols-1 md:grid-cols-12 gap-3 sm:gap-4 items-center">
         {/* Main Score Display */}
-        <div className="md:col-span-5 lg:col-span-4 flex flex-col xs:flex-row items-center xs:items-center text-center xs:text-left gap-2.5 sm:gap-4">
+        <div className="md:col-span-5 lg:col-span-4 flex flex-col sm:flex-row items-center sm:items-center text-center sm:text-left gap-2.5 sm:gap-4">
           <div
             className={`flex flex-col items-center justify-center w-16 h-16 sm:w-20 sm:h-20 md:w-24 md:h-24 rounded-2xl border flex-shrink-0 ${colors.bg} ${colors.border}`}
             aria-label={srLabel}
