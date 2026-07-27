@@ -18,7 +18,10 @@ export type HarnessTab = "overview" | "findings" | "sessions" | "assets" | "hist
 
 export interface HarnessContextValue {
   serverKey?: string;
-  projectDir: string;
+  /** Opaque FlowDeck-registered project identifier. Never a filesystem path. */
+  projectKey: string;
+  /** Cosmetic-only display path for the browser UI. Never used for API auth. */
+  displayProjectPath?: string;
   report: HarnessReport | undefined;
   rawReport: unknown;
   progress: HarnessRunProgress | undefined;
@@ -76,7 +79,10 @@ const HarnessContext = createContext<HarnessContextValue | undefined>(undefined)
 export interface HarnessProviderProps {
   children: React.ReactNode;
   serverKey?: string;
-  projectDir: string;
+  /** Opaque FlowDeck-registered project identifier. */
+  projectKey: string;
+  /** Cosmetic-only display path for the UI. */
+  displayProjectPath?: string;
   initialDemoMode?: HarnessDemoMode;
   httpConfig?: HttpHarnessDataSourceConfig;
 }
@@ -84,7 +90,8 @@ export interface HarnessProviderProps {
 export function HarnessProvider({
   children,
   serverKey,
-  projectDir,
+  projectKey,
+  displayProjectPath,
   initialDemoMode,
   httpConfig,
 }: HarnessProviderProps) {
@@ -198,7 +205,7 @@ export function HarnessProvider({
     loadData();
     // Re-fetch when serverKey or projectDir changes (mounts a different data source)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dataSource, serverKey, projectDir]);
+  }, [dataSource, serverKey, projectKey]);
 
   const setDemoMode = useCallback((mode: HarnessDemoMode | undefined) => {
     setDemoModeState(mode);
@@ -545,7 +552,8 @@ export function HarnessProvider({
 
   const value: HarnessContextValue = {
     serverKey,
-    projectDir,
+    projectKey,
+    displayProjectPath,
     report,
     rawReport,
     progress,

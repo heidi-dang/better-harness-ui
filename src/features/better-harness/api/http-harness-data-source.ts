@@ -22,7 +22,11 @@ export interface HttpHarnessDataSourceConfig {
   baseUrl: string;
   serverKey: string;
   projectKey: string;
-  projectDir?: string;
+  /**
+   * Cosmetic-only display path for the UI.
+   * Never used for API authorisation or backend routing.
+   */
+  displayProjectPath?: string;
   authToken?: string;
   /**
    * Called when a 401/403 response is received.

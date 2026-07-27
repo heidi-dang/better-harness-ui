@@ -30,26 +30,33 @@ export default function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, []);
 
+  // Parse route — extract serverKey (opaque), projectKey (opaque), displayProjectPath (cosmetic)
   const routeInfo = parseHarnessRoute(currentPath);
-  const serverKey = routeInfo.serverKey || "main-server";
-  const projectDir = routeInfo.projectDir || "/workspace/opencode-web-ui";
+  const serverKey = routeInfo.serverKey;
+  const projectKey = routeInfo.projectKey;
+  const displayProjectPath = routeInfo.displayProjectPath;
 
-  // Build httpConfig for production backend connection
+  // Build httpConfig ONLY when both serverKey and projectKey are present.
+  // Missing configuration selects UnavailableHarnessDataSource and makes zero requests.
   const httpConfig = useMemo<HttpHarnessDataSourceConfig | undefined>(() => {
-    // Use FlowDeck API base URL from env, or default to localhost
-    const baseUrl = import.meta.env.VITE_HARNESS_API_URL || "http://127.0.0.1:0";
-    if (!serverKey || !projectDir) return undefined;
+    const baseUrl = import.meta.env.VITE_HARNESS_API_URL;
+    if (!baseUrl || !serverKey || !projectKey) return undefined;
+
     return {
       baseUrl,
       serverKey,
-      projectKey: btoa(projectDir).replace(/[+/=]/g, "_"),
-      projectDir,
+      projectKey,
+      displayProjectPath,
       authToken: import.meta.env.VITE_HARNESS_AUTH_TOKEN || undefined,
     };
-  }, [serverKey, projectDir]);
+  }, [serverKey, projectKey, displayProjectPath]);
 
-  const navigateTo = (newServer: string | undefined, newDir: string) => {
-    const newRoute = buildHarnessRoute(newServer, newDir);
+  const navigateTo = (
+    newServer: string | undefined,
+    newProjectKey: string,
+    newDisplayPath?: string,
+  ) => {
+    const newRoute = buildHarnessRoute(newServer, newProjectKey, newDisplayPath);
     window.history.pushState({}, "", newRoute);
     setCurrentPath(newRoute);
     setShowCommandPalette(false);
@@ -77,14 +84,20 @@ export default function App() {
           </div>
           {/* Row 2: Server + Project path */}
           <div className="flex items-center gap-1 min-w-0 overflow-hidden">
-            <div className="flex items-center gap-1 text-slate-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 min-w-0 max-w-[45%]">
-              <Server className="w-3 h-3 text-sky-400 shrink-0" />
-              <span className="font-mono text-slate-200 truncate block min-w-0">{serverKey}</span>
-            </div>
-            <span className="text-slate-600 shrink-0">/</span>
+            {serverKey && (
+              <>
+                <div className="flex items-center gap-1 text-slate-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 min-w-0 max-w-[45%]">
+                  <Server className="w-3 h-3 text-sky-400 shrink-0" />
+                  <span className="font-mono text-slate-200 truncate block min-w-0">{serverKey}</span>
+                </div>
+                <span className="text-slate-600 shrink-0">/</span>
+              </>
+            )}
             <div className="flex items-center gap-1 text-slate-300 bg-slate-900 px-2 py-1 rounded border border-slate-800 min-w-0 max-w-[50%]">
               <FolderGit2 className="w-3 h-3 text-purple-400 shrink-0" />
-              <span className="font-mono text-slate-200 truncate block min-w-0">{projectDir}</span>
+              <span className="font-mono text-slate-200 truncate block min-w-0">
+                {displayProjectPath || projectKey || "No project configured"}
+              </span>
             </div>
           </div>
         </div>
@@ -97,19 +110,22 @@ export default function App() {
               <span>OpenCode Web UI</span>
             </div>
 
-            <span className="text-slate-600 shrink-0">/</span>
-
-            <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 max-w-[180px]">
-              <Server className="w-3.5 h-3.5 text-sky-400 shrink-0" />
-              <span className="font-mono text-slate-200 truncate block min-w-0">{serverKey}</span>
-            </div>
+            {serverKey && (
+              <>
+                <span className="text-slate-600 shrink-0">/</span>
+                <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 max-w-[180px]">
+                  <Server className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                  <span className="font-mono text-slate-200 truncate block min-w-0">{serverKey}</span>
+                </div>
+              </>
+            )}
 
             <span className="text-slate-600 shrink-0">/</span>
 
             <div className="flex items-center gap-1.5 text-slate-300 bg-slate-900 px-2.5 py-1 rounded border border-slate-800 min-w-0 max-w-[240px]">
               <FolderGit2 className="w-3.5 h-3.5 text-purple-400 shrink-0" />
               <span className="font-mono text-slate-200 truncate block min-w-0">
-                {projectDir}
+                {displayProjectPath || projectKey || "No project configured"}
               </span>
             </div>
           </div>
@@ -131,7 +147,12 @@ export default function App() {
       </nav>
 
       {/* Main Page Component */}
-      <BetterHarnessPage serverKey={serverKey} projectDir={projectDir} httpConfig={httpConfig} />
+      <BetterHarnessPage
+        serverKey={serverKey}
+        projectKey={projectKey}
+        displayProjectPath={displayProjectPath}
+        httpConfig={httpConfig}
+      />
 
       {/* Command Palette Modal */}
       {showCommandPalette && (
@@ -162,35 +183,17 @@ export default function App() {
 
             <div className="space-y-1">
               <button
-                onClick={() => navigateTo(serverKey, "/workspace/opencode-web-ui")}
+                onClick={() => navigateTo(serverKey || "main", "opencode-web-ui", "/workspace/opencode-web-ui")}
                 className="w-full text-left p-3 rounded-lg hover:bg-slate-800/80 transition-colors text-xs text-slate-200 flex items-center justify-between group"
               >
                 <div className="flex items-center gap-2">
                   <Sparkles className="w-4 h-4 text-sky-400" />
                   <div>
                     <div className="font-bold text-white group-hover:text-sky-300">
-                      Project: Open Better Harness
+                      Open Better Harness
                     </div>
                     <div className="text-[11px] text-slate-400">
-                      Open Better Harness dashboard for /workspace/opencode-web-ui
-                    </div>
-                  </div>
-                </div>
-                <span className="font-mono text-[10px] text-slate-500">Enter</span>
-              </button>
-
-              <button
-                onClick={() => navigateTo("secondary-server", "/workspace/backend-service")}
-                className="w-full text-left p-3 rounded-lg hover:bg-slate-800/80 transition-colors text-xs text-slate-200 flex items-center justify-between group"
-              >
-                <div className="flex items-center gap-2">
-                  <Server className="w-4 h-4 text-purple-400" />
-                  <div>
-                    <div className="font-bold text-white group-hover:text-purple-300">
-                      Switch Server: secondary-server (/workspace/backend-service)
-                    </div>
-                    <div className="text-[11px] text-slate-400">
-                      Open Harness dashboard on secondary server key
+                      Open Better Harness dashboard for this project
                     </div>
                   </div>
                 </div>
@@ -208,7 +211,7 @@ export default function App() {
                   <RefreshCw className="w-4 h-4 text-emerald-400" />
                   <div>
                     <div className="font-bold text-white group-hover:text-emerald-300">
-                      Project: Regenerate Better Harness
+                      Regenerate Better Harness
                     </div>
                     <div className="text-[11px] text-slate-400">
                       Trigger re-analysis run for current project

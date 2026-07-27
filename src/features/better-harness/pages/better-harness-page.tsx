@@ -220,13 +220,24 @@ function BetterHarnessPageContent() {
 
 export interface BetterHarnessPageProps {
   serverKey?: string;
-  projectDir: string;
+  projectKey: string;
+  displayProjectPath?: string;
   httpConfig?: HttpHarnessDataSourceConfig;
 }
 
-export function BetterHarnessPage({ serverKey, projectDir, httpConfig }: BetterHarnessPageProps) {
+export function BetterHarnessPage({
+  serverKey,
+  projectKey,
+  displayProjectPath,
+  httpConfig,
+}: BetterHarnessPageProps) {
   return (
-    <HarnessProvider serverKey={serverKey} projectDir={projectDir} httpConfig={httpConfig}>
+    <HarnessProvider
+      serverKey={serverKey}
+      projectKey={projectKey}
+      displayProjectPath={displayProjectPath}
+      httpConfig={httpConfig}
+    >
       <BetterHarnessPageContent />
     </HarnessProvider>
   );
