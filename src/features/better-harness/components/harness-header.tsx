@@ -6,7 +6,6 @@ import {
   Sparkles,
   RefreshCw,
   ExternalLink,
-  ShieldAlert,
   Server,
   FolderGit2,
   Clock,

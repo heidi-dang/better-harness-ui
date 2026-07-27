@@ -12,7 +12,6 @@ import {
   AlertTriangle,
   Target,
   CheckSquare,
-  Clock,
   ExternalLink,
   ShieldAlert,
   XCircle,

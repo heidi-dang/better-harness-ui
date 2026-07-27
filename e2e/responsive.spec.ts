@@ -60,7 +60,7 @@ for (const vp of VIEWPORTS) {
       expect(scrollWidth).toBeLessThanOrEqual(vp.width + 1); // allow 1px tolerance
     });
 
-    test("primary touch targets are at least 44x44px", async ({ page, browserName }) => {
+    test("primary touch targets are at least 44x44px", async ({ page, browserName: _browserName }) => {
       for (const target of PRIMARY_TOUCH_TARGETS) {
         const btn = page.locator(target.selector).first();
         const count = await btn.count();

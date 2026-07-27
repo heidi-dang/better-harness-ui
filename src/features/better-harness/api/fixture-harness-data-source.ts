@@ -1,4 +1,4 @@
-import { HarnessDataSource } from "./harness-data-source";
+import { HarnessDataSource, BatchPlanFixResult, BatchIgnoreResult, BatchVerifyResult } from "./harness-data-source";
 import { HarnessReport, HarnessRunProgress, HarnessDemoMode } from "../types";
 import {
   COMPLETED_HARNESS_REPORT,
@@ -101,7 +101,7 @@ export class FixtureHarnessDataSource implements HarnessDataSource {
     return { accepted: true };
   }
 
-  async ignore(findingId: string, reason: string): Promise<{ accepted: boolean }> {
+  async ignore(findingId: string, _reason: string): Promise<{ accepted: boolean }> {
     if (this.currentReport) {
       const finding = this.currentReport.findings.find((f) => f.id === findingId);
       if (finding) {
@@ -109,6 +109,61 @@ export class FixtureHarnessDataSource implements HarnessDataSource {
       }
     }
     return { accepted: true };
+  }
+
+  async batchPlanFix(findingIds: string[]): Promise<BatchPlanFixResult[]> {
+    const results: BatchPlanFixResult[] = [];
+    for (const findingId of findingIds) {
+      if (this.currentReport) {
+        const finding = this.currentReport.findings.find((f) => f.id === findingId);
+        if (finding) {
+          finding.status = "planning";
+          finding.repairSessionId = `sess-rep-demo-${findingId}`;
+          results.push({ findingId, accepted: true, repairSessionId: finding.repairSessionId });
+        } else {
+          results.push({ findingId, accepted: false, error: "Finding not found" });
+        }
+      } else {
+        results.push({ findingId, accepted: true, repairSessionId: `sess-rep-demo-${findingId}` });
+      }
+    }
+    return results;
+  }
+
+  async batchIgnore(findingIds: string[], _reason: string): Promise<BatchIgnoreResult[]> {
+    const results: BatchIgnoreResult[] = [];
+    for (const findingId of findingIds) {
+      if (this.currentReport) {
+        const finding = this.currentReport.findings.find((f) => f.id === findingId);
+        if (finding) {
+          finding.status = "ignored";
+          results.push({ findingId, accepted: true });
+        } else {
+          results.push({ findingId, accepted: false, error: "Finding not found" });
+        }
+      } else {
+        results.push({ findingId, accepted: true });
+      }
+    }
+    return results;
+  }
+
+  async batchVerify(findingIds: string[]): Promise<BatchVerifyResult[]> {
+    const results: BatchVerifyResult[] = [];
+    for (const findingId of findingIds) {
+      if (this.currentReport) {
+        const finding = this.currentReport.findings.find((f) => f.id === findingId);
+        if (finding) {
+          finding.status = "fixed";
+          results.push({ findingId, accepted: true });
+        } else {
+          results.push({ findingId, accepted: false, error: "Finding not found" });
+        }
+      } else {
+        results.push({ findingId, accepted: true });
+      }
+    }
+    return results;
   }
 
   async cancel(): Promise<void> {

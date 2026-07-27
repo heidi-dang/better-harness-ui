@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import BetterHarnessPage from "./features/better-harness/pages/better-harness-page";
 import { parseHarnessRoute, buildHarnessRoute } from "./features/better-harness/utils/harness-route";
-import { Command, Server, FolderGit2, Sparkles, RefreshCw, Layers, Menu } from "lucide-react";
+import { Command, Server, FolderGit2, Sparkles, RefreshCw } from "lucide-react";
 
 export default function App() {
   const [currentPath, setCurrentPath] = useState(() =>

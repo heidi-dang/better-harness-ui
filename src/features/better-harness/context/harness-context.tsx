@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useMemo, useCallback } from "react";
+import React, { createContext, useContext, useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   HarnessReport,
   HarnessRunProgress,
@@ -8,6 +8,7 @@ import {
   HarnessFinding,
 } from "../types";
 import { HarnessDataSource } from "../api/harness-data-source";
+import { HttpHarnessDataSource, HttpHarnessDataSourceConfig } from "../api/http-harness-data-source";
 import { FixtureHarnessDataSource } from "../api/fixture-harness-data-source";
 import { UnavailableHarnessDataSource } from "../api/unavailable-harness-data-source";
 import { filterAndSortFindings } from "../utils/finding-filters";
@@ -77,6 +78,7 @@ export interface HarnessProviderProps {
   serverKey?: string;
   projectDir: string;
   initialDemoMode?: HarnessDemoMode;
+  httpConfig?: HttpHarnessDataSourceConfig;
 }
 
 export function HarnessProvider({
@@ -84,6 +86,7 @@ export function HarnessProvider({
   serverKey,
   projectDir,
   initialDemoMode,
+  httpConfig,
 }: HarnessProviderProps) {
   // Check URL query parameters for demo mode
   const getDemoModeFromUrl = (): HarnessDemoMode | undefined => {
@@ -117,20 +120,18 @@ export function HarnessProvider({
   const [report, setReport] = useState<HarnessReport | undefined>(undefined);
   const [rawReport, setRawReport] = useState<unknown>(undefined);
   const [progress, setProgress] = useState<HarnessRunProgress | undefined>(undefined);
+  const progressUnsubscribeRef = useRef<(() => void) | null>(null);
 
   // Data source selection
   const dataSource = useMemo<HarnessDataSource>(() => {
     if (demoMode) {
       return new FixtureHarnessDataSource(demoMode);
     }
-    // In production without demo parameter, default to UnavailableHarnessDataSource
-    const isProd = process.env.NODE_ENV === "production";
-    if (isProd) {
-      return new UnavailableHarnessDataSource();
+    if (httpConfig) {
+      return new HttpHarnessDataSource(httpConfig);
     }
-    // In development environment, default to FixtureHarnessDataSource
-    return new FixtureHarnessDataSource("completed");
-  }, [demoMode]);
+    return new UnavailableHarnessDataSource();
+  }, [demoMode, httpConfig]);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
@@ -180,6 +181,7 @@ export function HarnessProvider({
   }, [dataSource, selectedFindingId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
   }, [loadData, serverKey, projectDir]);
 
@@ -203,11 +205,44 @@ export function HarnessProvider({
   const regenerateAnalysis = useCallback(async () => {
     try {
       setActionMessage({
-        text: "Regeneration requested (UI-only mode). FlowDeck engine adapter is pending next phase.",
+        text: "Starting analysis regeneration...",
         type: "info",
       });
       const res = await dataSource.regenerate();
-      if (res.accepted) {
+      if (res.accepted && res.runId) {
+        // Subscribe to SSE progress if the data source supports it
+        if ("subscribeToProgress" in dataSource) {
+          const httpSource = dataSource as HttpHarnessDataSource;
+          if (typeof httpSource.subscribeToProgress === "function") {
+            // Clean up any previous subscription
+            if (progressUnsubscribeRef.current) {
+              progressUnsubscribeRef.current();
+            }
+            progressUnsubscribeRef.current = httpSource.subscribeToProgress(
+              res.runId,
+              (event) => {
+                if (event.type === "run.progress" || event.type === "raw") {
+                  const progressData = event.data as HarnessRunProgress;
+                  if (progressData?.status) {
+                    setProgress(progressData);
+                  }
+                }
+                if (event.type === "report.completed" || event.type === "run.failed") {
+                  // Run finished, unsubscribe and reload
+                  if (progressUnsubscribeRef.current) {
+                    progressUnsubscribeRef.current();
+                    progressUnsubscribeRef.current = null;
+                  }
+                  loadData();
+                }
+              },
+              () => {
+                // SSE error: fall back to polling
+                progressUnsubscribeRef.current = null;
+              }
+            );
+          }
+        }
         await loadData();
       }
     } catch (err) {
@@ -224,7 +259,7 @@ export function HarnessProvider({
         const res = await dataSource.planFix(findingId);
         if (res.accepted) {
           setActionMessage({
-            text: `Plan created in UI mode (Session ID: ${res.repairSessionId || "demo-session"}). No FlowDeck execution triggered.`,
+            text: `Fix planned for finding (Session ID: ${res.repairSessionId || "pending"}).`,
             type: "success",
           });
           await loadData();
@@ -245,7 +280,7 @@ export function HarnessProvider({
         const res = await dataSource.verify(findingId);
         if (res.accepted) {
           setActionMessage({
-            text: "Finding verified and marked as fixed in UI preview mode.",
+            text: "Finding verified and marked as fixed.",
             type: "success",
           });
           await loadData();
@@ -266,7 +301,7 @@ export function HarnessProvider({
         const res = await dataSource.ignore(findingId, reason);
         if (res.accepted) {
           setActionMessage({
-            text: `Finding ignored in UI preview mode: "${reason}"`,
+            text: `Finding ignored: "${reason}"`,
             type: "info",
           });
           await loadData();
@@ -304,11 +339,11 @@ export function HarnessProvider({
     });
   }, [report, filters]);
 
-  // Reconcile selection when report or filters update
   useEffect(() => {
     if (report) {
       const currentFiltered = filterAndSortFindings(report.findings, filters);
       const visibleIds = new Set(currentFiltered.map((f) => f.id));
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setSelectedFindingIds((prev) => prev.filter((id) => visibleIds.has(id)));
     }
   }, [report, filters]);
@@ -320,41 +355,29 @@ export function HarnessProvider({
   const batchPlanFix = useCallback(async () => {
     if (selectedFindingIds.length === 0 || isBatchProcessing) return;
     setIsBatchProcessing(true);
-    let successCount = 0;
-    const failedIds: string[] = [];
 
     try {
-      for (const id of selectedFindingIds) {
-        try {
-          const res = await dataSource.planFix(id);
-          if (res.accepted) {
-            successCount++;
-          } else {
-            failedIds.push(id);
-          }
-        } catch {
-          failedIds.push(id);
-        }
-      }
+      const results = await dataSource.batchPlanFix(selectedFindingIds);
+      const accepted = results.filter((r) => r.accepted);
+      const failed = results.filter((r) => !r.accepted);
 
-      if (failedIds.length === 0) {
+      if (failed.length === 0) {
         setActionMessage({
-          text: `Batch fix planned for all ${successCount} selected findings.`,
+          text: `Batch fix planned for all ${accepted.length} selected findings.`,
           type: "success",
         });
         setSelectedFindingIds([]);
-      } else if (successCount > 0) {
+      } else if (accepted.length > 0) {
         setActionMessage({
-          text: `Batch fix planned for ${successCount} findings (${failedIds.length} failed). Retained failed items for retry.`,
+          text: `Batch fix planned for ${accepted.length} findings (${failed.length} failed). Retained failed items for retry.`,
           type: "warning",
         });
-        setSelectedFindingIds(failedIds);
+        setSelectedFindingIds(failed.map((r) => r.findingId));
       } else {
         setActionMessage({
-          text: `Batch fix planning failed for all ${failedIds.length} selected findings.`,
+          text: `Batch fix planning failed for all ${failed.length} selected findings.`,
           type: "warning",
         });
-        setSelectedFindingIds(failedIds);
       }
       await loadData();
     } catch (err) {
@@ -372,41 +395,30 @@ export function HarnessProvider({
       const trimmedReason = reason ? reason.trim() : "";
       if (selectedFindingIds.length === 0 || isBatchProcessing || trimmedReason.length < 3) return;
       setIsBatchProcessing(true);
-      let successCount = 0;
-      const failedIds: string[] = [];
 
       try {
-        for (const id of selectedFindingIds) {
-          try {
-            const res = await dataSource.ignore(id, trimmedReason);
-            if (res.accepted) {
-              successCount++;
-            } else {
-              failedIds.push(id);
-            }
-          } catch {
-            failedIds.push(id);
-          }
-        }
+        const results = await dataSource.batchIgnore(selectedFindingIds, trimmedReason);
+        const accepted = results.filter((r) => r.accepted);
+        const failed = results.filter((r) => !r.accepted);
 
-        if (failedIds.length === 0) {
+        if (failed.length === 0) {
           setActionMessage({
-            text: `Batch ignored ${successCount} findings ("${trimmedReason}").`,
+            text: `Batch ignored ${accepted.length} findings ("${trimmedReason}").`,
             type: "info",
           });
           setSelectedFindingIds([]);
-        } else if (successCount > 0) {
+        } else if (accepted.length > 0) {
           setActionMessage({
-            text: `Batch ignored ${successCount} findings (${failedIds.length} failed). Retained failed items for retry.`,
+            text: `Batch ignored ${accepted.length} findings (${failed.length} failed). Retained failed items for retry.`,
             type: "warning",
           });
-          setSelectedFindingIds(failedIds);
+          setSelectedFindingIds(failed.map((r) => r.findingId));
         } else {
           setActionMessage({
-            text: `Batch ignore failed for all ${failedIds.length} selected findings.`,
+            text: `Batch ignore failed for all ${failed.length} selected findings.`,
             type: "warning",
           });
-          setSelectedFindingIds(failedIds);
+          setSelectedFindingIds(failed.map((r) => r.findingId));
         }
         await loadData();
       } catch (err) {
@@ -424,11 +436,21 @@ export function HarnessProvider({
   const cancelAnalysis = useCallback(async () => {
     await dataSource.cancel();
     setActionMessage({
-      text: "Analysis cancelled (UI preview mode).",
+      text: "Analysis cancelled.",
       type: "info",
     });
     await loadData();
   }, [dataSource, loadData]);
+
+  // Clean up SSE subscription on unmount
+  useEffect(() => {
+    return () => {
+      if (progressUnsubscribeRef.current) {
+        progressUnsubscribeRef.current();
+        progressUnsubscribeRef.current = null;
+      }
+    };
+  }, []);
 
   const selectDimensionFilter = useCallback((dimension: HarnessDimension) => {
     setFilters((prev) => ({
