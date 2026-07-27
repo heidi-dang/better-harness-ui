@@ -121,6 +121,15 @@ export function HarnessProvider({
   const [rawReport, setRawReport] = useState<unknown>(undefined);
   const [progress, setProgress] = useState<HarnessRunProgress | undefined>(undefined);
   const progressUnsubscribeRef = useRef<(() => void) | null>(null);
+  const progressPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  /** Deterministic polling cleanup: stops polling timer and clears the ref. */
+  const stopPolling = useCallback(() => {
+    if (progressPollingRef.current) {
+      clearInterval(progressPollingRef.current);
+      progressPollingRef.current = null;
+    }
+  }, []);
 
   // Data source selection
   const dataSource = useMemo<HarnessDataSource>(() => {
@@ -208,8 +217,14 @@ export function HarnessProvider({
         text: "Starting analysis regeneration...",
         type: "info",
       });
+
+      // Stop any in-flight polling from a previous regeneration
+      stopPolling();
+
       const res = await dataSource.regenerate();
       if (res.accepted && res.runId) {
+        let sseSubscribed = false;
+
         // Subscribe to SSE progress if the data source supports it
         if ("subscribeToProgress" in dataSource) {
           const httpSource = dataSource as HttpHarnessDataSource;
@@ -218,6 +233,7 @@ export function HarnessProvider({
             if (progressUnsubscribeRef.current) {
               progressUnsubscribeRef.current();
             }
+
             progressUnsubscribeRef.current = httpSource.subscribeToProgress(
               res.runId,
               (event) => {
@@ -227,8 +243,9 @@ export function HarnessProvider({
                     setProgress(progressData);
                   }
                 }
-                if (event.type === "report.completed" || event.type === "run.failed") {
-                  // Run finished, unsubscribe and reload
+                if (event.type === "report.completed" || event.type === "run.failed" || event.type === "run.cancelled") {
+                  // Run finished — stop polling, unsubscribe, and reload
+                  stopPolling();
                   if (progressUnsubscribeRef.current) {
                     progressUnsubscribeRef.current();
                     progressUnsubscribeRef.current = null;
@@ -237,13 +254,40 @@ export function HarnessProvider({
                 }
               },
               () => {
-                // SSE error: fall back to polling
+                // SSE error: clean up subscription, start polling fallback
                 progressUnsubscribeRef.current = null;
+
+                if (!progressPollingRef.current) {
+                  progressPollingRef.current = setInterval(async () => {
+                    try {
+                      const prog = await dataSource.getRunProgress?.();
+                      if (prog) {
+                        setProgress(prog);
+                        // Stop polling and reload when run reaches a terminal state
+                        if (prog.status === "completed" || prog.status === "failed") {
+                          stopPolling();
+                          loadData();
+                        }
+                      }
+                      // prog === undefined (404/204) → keep polling
+                      // (run may still be initializing or was just cancelled)
+                    } catch {
+                      // Request error → keep polling, don't create overlapping intervals
+                    }
+                  }, 5000);
+                }
               }
             );
+
+            sseSubscribed = true;
           }
         }
-        await loadData();
+
+        // Only load data immediately if we didn't subscribe to SSE
+        // (SSE will trigger loadData via report.completed/run.failed)
+        if (!sseSubscribed) {
+          await loadData();
+        }
       }
     } catch (err) {
       setActionMessage({
@@ -251,7 +295,7 @@ export function HarnessProvider({
         type: "warning",
       });
     }
-  }, [dataSource, loadData]);
+  }, [dataSource, loadData, stopPolling]);
 
   const planFixForFinding = useCallback(
     async (findingId: string) => {
@@ -434,23 +478,32 @@ export function HarnessProvider({
   );
 
   const cancelAnalysis = useCallback(async () => {
+    // Stop polling and unsubscribe from SSE before cancelling
+    stopPolling();
+    if (progressUnsubscribeRef.current) {
+      progressUnsubscribeRef.current();
+      progressUnsubscribeRef.current = null;
+    }
+    setProgress(undefined);
+
     await dataSource.cancel();
     setActionMessage({
       text: "Analysis cancelled.",
       type: "info",
     });
     await loadData();
-  }, [dataSource, loadData]);
+  }, [dataSource, loadData, stopPolling]);
 
-  // Clean up SSE subscription on unmount
+  // Clean up SSE subscription and polling on unmount
   useEffect(() => {
     return () => {
       if (progressUnsubscribeRef.current) {
         progressUnsubscribeRef.current();
         progressUnsubscribeRef.current = null;
       }
+      stopPolling();
     };
-  }, []);
+  }, [stopPolling]);
 
   const selectDimensionFilter = useCallback((dimension: HarnessDimension) => {
     setFilters((prev) => ({

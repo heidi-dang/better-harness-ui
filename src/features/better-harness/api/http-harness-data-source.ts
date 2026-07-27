@@ -5,6 +5,17 @@ import {
   BatchVerifyResult,
 } from "./harness-data-source";
 import { HarnessReport, HarnessRunProgress } from "../types";
+import {
+  validateAvailabilityResponse,
+  validateStartRunResponse,
+  validatePlanFixResponse,
+  validateIgnoreResponse,
+  validateVerifyResponse,
+  validateHarnessReportResponse,
+  validateHarnessReportArrayResponse,
+  validateRunProgressResponse,
+  SSEEvent,
+} from "../schemas/harness-api";
 
 export interface HttpHarnessDataSourceConfig {
   baseUrl: string;
@@ -12,45 +23,12 @@ export interface HttpHarnessDataSourceConfig {
   projectKey: string;
   projectDir?: string;
   authToken?: string;
-}
-
-interface PlanFixResponse {
-  accepted: boolean;
-  results?: Array<{
-    findingId: string;
-    accepted: boolean;
-    repairSessionId?: string;
-    error?: string;
-  }>;
-  repairSessionId?: string;
-}
-
-interface IgnoreResponse {
-  accepted: boolean;
-  results?: Array<{
-    findingId: string;
-    accepted: boolean;
-    error?: string;
-  }>;
-}
-
-interface VerifyResponse {
-  accepted: boolean;
-  results?: Array<{
-    findingId: string;
-    accepted: boolean;
-    error?: string;
-  }>;
-}
-
-interface StartRunResponse {
-  accepted: boolean;
-  runId?: string;
-}
-
-interface SSEEvent {
-  type: string;
-  data: unknown;
+  /**
+   * Called when a 401/403 response is received.
+   * Return a new token to retry, or undefined to fail.
+   * Concurrent 401s are coalesced into a single refresh call.
+   */
+  onAuthFailure?: () => Promise<string | undefined>;
 }
 
 export class HttpHarnessDataSource implements HarnessDataSource {
@@ -60,9 +38,14 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   private projectKey: string;
   private encodedProjectKey: string;
   private authToken?: string;
+  private onAuthFailure?: () => Promise<string | undefined>;
   private currentRunId: string | undefined;
   private runAbortController: AbortController | null = null;
-  private progressEventSource: EventSource | null = null;
+
+  /** Active fetch-based SSE reader controller for cancellation */
+  private sseAbortController: AbortController | null = null;
+  /** Flag to prevent multiple concurrent auth refresh calls */
+  private authRefreshInFlight: Promise<string | undefined> | null = null;
 
   constructor(config: HttpHarnessDataSourceConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -71,6 +54,7 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     this.projectKey = config.projectKey;
     this.encodedProjectKey = encodeURIComponent(config.projectKey);
     this.authToken = config.authToken;
+    this.onAuthFailure = config.onAuthFailure;
   }
 
   private get apiBase(): string {
@@ -85,11 +69,20 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     return headers;
   }
 
-  private async jsonRequest<T>(
+  /**
+   * Generic fetch + Zod validation.
+   * - 204 / 404 → returns `undefined` (resource does not exist yet)
+   * - 401/403 with onAuthFailure → coalesces concurrent refreshes, retries ONCE
+   * - Other non-ok → throws Error with status and body
+   * - OK → validates JSON against the provided Zod validator
+   */
+  private async validatedRequest<T>(
     method: string,
     path: string,
+    validate: (data: unknown) => { valid: true; value: T } | { valid: false; error: string },
     body?: unknown,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    isRetry?: boolean
   ): Promise<T> {
     const url = `${this.apiBase}${path}`;
     const res = await fetch(url, {
@@ -99,7 +92,17 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       signal,
     });
 
+    // 204/404 → expected empty state, not an error
     if (res.status === 204 || res.status === 404) return undefined as T;
+
+    // 401/403 → attempt auth refresh once
+    if ((res.status === 401 || res.status === 403) && this.onAuthFailure && !isRetry) {
+      const newToken = await this.refreshAuth();
+      if (newToken) {
+        this.authToken = newToken;
+        return this.validatedRequest<T>(method, path, validate, body, signal, true);
+      }
+    }
 
     if (!res.ok) {
       let errorBody: string;
@@ -111,12 +114,41 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       throw new Error(`Harness API error (${res.status}): ${errorBody || res.statusText}`);
     }
 
-    return res.json() as Promise<T>;
+    const json: unknown = await res.json();
+    const validation = validate(json);
+    if (!validation.valid) {
+      throw new Error(`Harness API schema error: ${validation.error}`);
+    }
+
+    return validation.value;
   }
+
+  /**
+   * Coalesce concurrent auth refresh calls into a single in-flight promise.
+   * This prevents multiple callers from each triggering `onAuthFailure`
+   * when they all receive 401 from the same expired token.
+   */
+  private async refreshAuth(): Promise<string | undefined> {
+    if (!this.onAuthFailure) return undefined;
+
+    if (!this.authRefreshInFlight) {
+      this.authRefreshInFlight = this.onAuthFailure().finally(() => {
+        this.authRefreshInFlight = null;
+      });
+    }
+
+    return this.authRefreshInFlight;
+  }
+
+  // ── Data Source Implementation ──────────────────────────────────────
 
   async availability(): Promise<{ available: boolean; reason?: string }> {
     try {
-      return await this.jsonRequest<{ available: boolean; reason?: string }>("GET", "/availability");
+      return await this.validatedRequest(
+        "GET",
+        "/availability",
+        validateAvailabilityResponse
+      );
     } catch (err) {
       return {
         available: false,
@@ -126,35 +158,38 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async getReport(): Promise<HarnessReport | undefined> {
-    try {
-      return await this.jsonRequest<HarnessReport | undefined>("GET", "/report");
-    } catch {
-      return undefined;
-    }
+    // 404/204 → undefined (validatedRequest returns undefined)
+    // Other errors → propagate to caller
+    return this.validatedRequest(
+      "GET",
+      "/report",
+      validateHarnessReportResponse
+    );
   }
 
   async getHistory(): Promise<HarnessReport[]> {
-    try {
-      return await this.jsonRequest<HarnessReport[]>("GET", "/history");
-    } catch {
-      return [];
-    }
+    return this.validatedRequest(
+      "GET",
+      "/history",
+      validateHarnessReportArrayResponse
+    );
   }
 
   async getRunProgress(): Promise<HarnessRunProgress | undefined> {
-    try {
-      return await this.jsonRequest<HarnessRunProgress>("GET", "/runs/current");
-    } catch {
-      return undefined;
-    }
+    return this.validatedRequest(
+      "GET",
+      "/runs/current",
+      validateRunProgressResponse
+    );
   }
 
   async regenerate(): Promise<{ accepted: boolean; runId?: string }> {
     this.runAbortController = new AbortController();
     try {
-      const result = await this.jsonRequest<StartRunResponse>(
+      const result = await this.validatedRequest(
         "POST",
         "/runs",
+        validateStartRunResponse,
         {
           mode: "full",
           sourceRevision: "current",
@@ -175,9 +210,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async planFix(findingId: string): Promise<{ accepted: boolean; repairSessionId?: string }> {
-    const result = await this.jsonRequest<PlanFixResponse>("POST", "/findings/plan-fix", {
-      findingIds: [findingId],
-    });
+    const result = await this.validatedRequest(
+      "POST",
+      "/findings/plan-fix",
+      validatePlanFixResponse,
+      { findingIds: [findingId] }
+    );
 
     if (result.results && result.results.length > 0) {
       return {
@@ -193,9 +231,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async verify(findingId: string): Promise<{ accepted: boolean }> {
-    const result = await this.jsonRequest<VerifyResponse>("POST", "/findings/verify", {
-      findingIds: [findingId],
-    });
+    const result = await this.validatedRequest(
+      "POST",
+      "/findings/verify",
+      validateVerifyResponse,
+      { findingIds: [findingId] }
+    );
 
     if (result.results && result.results.length > 0) {
       return { accepted: result.results[0].accepted };
@@ -205,10 +246,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async ignore(findingId: string, reason: string): Promise<{ accepted: boolean }> {
-    const result = await this.jsonRequest<IgnoreResponse>("POST", "/findings/ignore", {
-      findingIds: [findingId],
-      reason,
-    });
+    const result = await this.validatedRequest(
+      "POST",
+      "/findings/ignore",
+      validateIgnoreResponse,
+      { findingIds: [findingId], reason }
+    );
 
     if (result.results && result.results.length > 0) {
       return { accepted: result.results[0].accepted };
@@ -220,9 +263,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   async batchPlanFix(findingIds: string[]): Promise<BatchPlanFixResult[]> {
     if (findingIds.length === 0) return [];
 
-    const result = await this.jsonRequest<PlanFixResponse>("POST", "/findings/plan-fix", {
-      findingIds,
-    });
+    const result = await this.validatedRequest(
+      "POST",
+      "/findings/plan-fix",
+      validatePlanFixResponse,
+      { findingIds }
+    );
 
     if (result.results) {
       return result.results.map((r) => ({
@@ -233,7 +279,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       }));
     }
 
-    // Fallback: single-item result without per-finding breakdown
     return findingIds.map((id) => ({
       findingId: id,
       accepted: result.accepted,
@@ -247,10 +292,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   ): Promise<BatchIgnoreResult[]> {
     if (findingIds.length === 0) return [];
 
-    const result = await this.jsonRequest<IgnoreResponse>("POST", "/findings/ignore", {
-      findingIds,
-      reason,
-    });
+    const result = await this.validatedRequest(
+      "POST",
+      "/findings/ignore",
+      validateIgnoreResponse,
+      { findingIds, reason }
+    );
 
     if (result.results) {
       return result.results.map((r) => ({
@@ -269,9 +316,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   async batchVerify(findingIds: string[]): Promise<BatchVerifyResult[]> {
     if (findingIds.length === 0) return [];
 
-    const result = await this.jsonRequest<VerifyResponse>("POST", "/findings/verify", {
-      findingIds,
-    });
+    const result = await this.validatedRequest(
+      "POST",
+      "/findings/verify",
+      validateVerifyResponse,
+      { findingIds }
+    );
 
     if (result.results) {
       return result.results.map((r) => ({
@@ -291,7 +341,18 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     // Cancel via the current run ID first
     if (this.currentRunId) {
       try {
-        await this.jsonRequest<void>("POST", `/runs/${encodeURIComponent(this.currentRunId)}/cancel`);
+        await this.validatedRequest(
+          "POST",
+          `/runs/${encodeURIComponent(this.currentRunId)}/cancel`,
+          // Cancel responses are empty or just { accepted: boolean }
+          (data: unknown) => {
+            if (data === null || data === undefined) {
+              return { valid: true, value: undefined as void };
+            }
+            // Accept simple success response
+            return { valid: true, value: undefined as void };
+          }
+        );
       } catch {
         // Best-effort cancellation
       }
@@ -303,17 +364,25 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       this.runAbortController = null;
     }
 
-    // Close SSE connection
-    if (this.progressEventSource) {
-      this.progressEventSource.close();
-      this.progressEventSource = null;
-    }
+    // Cancel fetch-based SSE reader
+    this.cancelSSE();
 
     this.currentRunId = undefined;
   }
 
+  // ── Fetch-based SSE (supports Authorization headers) ────────────────
+
+  private cancelSSE(): void {
+    if (this.sseAbortController) {
+      this.sseAbortController.abort();
+      this.sseAbortController = null;
+    }
+  }
+
   /**
-   * Subscribe to SSE progress events for a run.
+   * Subscribe to SSE progress events using fetch() so we can pass
+   * Authorization headers that native EventSource cannot set.
+   *
    * Returns an unsubscribe function.
    */
   subscribeToProgress(
@@ -321,47 +390,93 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     onEvent: (event: SSEEvent) => void,
     onError?: (error: Event) => void
   ): () => void {
-    // Close any existing connection
-    if (this.progressEventSource) {
-      this.progressEventSource.close();
-    }
+    // Cancel any existing SSE connection
+    this.cancelSSE();
+
+    const abortController = new AbortController();
+    this.sseAbortController = abortController;
+    const signal = abortController.signal;
 
     const url = `${this.apiBase}/runs/${encodeURIComponent(runId)}/events`;
-    const eventSource = new EventSource(url);
-    this.progressEventSource = eventSource;
 
-    // Named event listeners matching the SSE contract
-    const eventTypes = ["run.queued", "run.started", "run.progress", "collector.started", "collector.completed", "analysis.started", "finding.created", "report.completed", "run.cancelled", "run.failed"];
-
-    for (const type of eventTypes) {
-      eventSource.addEventListener(type, ((e: MessageEvent) => {
-        try {
-          const parsed = JSON.parse(e.data) as SSEEvent;
-          onEvent(parsed);
-        } catch {
-          onEvent({ type, data: e.data });
-        }
-      }) as EventListener);
-    }
-
-    // Fallback to onmessage for unnamed events
-    eventSource.onmessage = (e: MessageEvent) => {
+    const startStream = async () => {
       try {
-        const parsed = JSON.parse(e.data) as SSEEvent;
-        onEvent(parsed);
-      } catch {
-        onEvent({ type: "raw", data: e.data });
+        const response = await fetch(url, {
+          headers: {
+            ...this.getHeaders(),
+            Accept: "text/event-stream",
+          },
+          signal,
+        });
+
+        if (!response.ok) {
+          throw new Error(`SSE connection failed: ${response.status}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error("SSE response body is not readable");
+        }
+
+        const decoder = new TextDecoder();
+        let buffer = "";
+        let currentEventType = "message";
+        let currentData = "";
+
+        const processLines = (text: string) => {
+          const lines = text.split("\n");
+          for (const line of lines) {
+            if (line.startsWith("event: ")) {
+              currentEventType = line.slice(7).trim();
+            } else if (line.startsWith("data: ")) {
+              currentData = line.slice(6);
+            } else if (line === "" && currentData) {
+              // Empty line = end of event, dispatch
+              try {
+                const parsed = JSON.parse(currentData);
+                onEvent({ type: currentEventType, data: parsed });
+              } catch {
+                onEvent({ type: currentEventType, data: currentData });
+              }
+              currentEventType = "message";
+              currentData = "";
+            }
+          }
+        };
+
+        while (!signal.aborted) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // Split on double newline (SSE event boundary)
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+
+          for (const part of parts) {
+            processLines(part);
+          }
+        }
+
+        // Process remaining buffer
+        if (buffer.trim()) {
+          processLines(buffer);
+        }
+      } catch (err) {
+        if (signal.aborted) return; // Intentional cancellation, not an error
+        if (onError) {
+          onError(new Event("error"));
+        }
       }
     };
 
-    if (onError) {
-      eventSource.onerror = onError;
-    }
+    startStream();
 
     return () => {
-      eventSource.close();
-      if (this.progressEventSource === eventSource) {
-        this.progressEventSource = null;
+      abortController.abort();
+      if (this.sseAbortController === abortController) {
+        this.sseAbortController = null;
       }
     };
   }
