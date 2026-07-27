@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+:root {
+  --v2-bg-surface: #0e0f12;
+  --v2-bg-surface-raised: #16181d;
+  --v2-bg-surface-sunken: #090a0c;
+  --v2-border-subtle: #262930;
+  --v2-border-strong: #3b404d;
+  --v2-text-primary: #f8fafc;
+  --v2-text-secondary: #cbd5e1;
+  --v2-text-muted: #94a3b8;
+  --v2-accent-primary: #0284c7;
+  --v2-accent-success: #10b981;
+  --v2-accent-warning: #f59e0b;
+  --v2-accent-danger: #f43f5e;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.2s ease-out forwards;
+}
+
+/* Global scrollbar removal for clean UI */
+html,
+body,
+#root,
+* {
+  -ms-overflow-style: none !important; /* IE and Edge */
+  scrollbar-width: none !important; /* Firefox */
+}
+
+html::-webkit-scrollbar,
+body::-webkit-scrollbar,
+#root::-webkit-scrollbar,
+*::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+  background: transparent !important;
+}
+
+.scrollbar-thin,
+.scrollbar-none {
+  -ms-overflow-style: none !important;
+  scrollbar-width: none !important;
+}
+
+.scrollbar-thin::-webkit-scrollbar,
+.scrollbar-none::-webkit-scrollbar {
+  display: none !important;
+  width: 0 !important;
+  height: 0 !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, ::before, ::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

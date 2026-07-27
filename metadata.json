@@ -1,0 +1,6 @@
+{
+  "name": "Better Harness Dashboard",
+  "description": "Native, production-quality Better Harness UI dashboard for analyzing codebases, findings, session metrics, and asset coverage.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
