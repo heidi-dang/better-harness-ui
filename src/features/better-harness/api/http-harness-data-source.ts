@@ -9,7 +9,9 @@ import { HarnessReport, HarnessRunProgress } from "../types";
 export interface HttpHarnessDataSourceConfig {
   baseUrl: string;
   serverKey: string;
-  projectDir: string;
+  projectKey: string;
+  projectDir?: string;
+  authToken?: string;
 }
 
 interface PlanFixResponse {
@@ -55,8 +57,10 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   private baseUrl: string;
   private serverKey: string;
   private encodedServerKey: string;
-  private projectDir: string;
-  private encodedProjectDir: string;
+  private projectKey: string;
+  private encodedProjectKey: string;
+  private authToken?: string;
+  private currentRunId: string | undefined;
   private runAbortController: AbortController | null = null;
   private progressEventSource: EventSource | null = null;
 
@@ -64,12 +68,21 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.serverKey = config.serverKey;
     this.encodedServerKey = encodeURIComponent(config.serverKey);
-    this.projectDir = config.projectDir;
-    this.encodedProjectDir = encodeURIComponent(config.projectDir);
+    this.projectKey = config.projectKey;
+    this.encodedProjectKey = encodeURIComponent(config.projectKey);
+    this.authToken = config.authToken;
   }
 
   private get apiBase(): string {
-    return `${this.baseUrl}/api/v1/servers/${this.encodedServerKey}/projects/${this.encodedProjectDir}/better-harness`;
+    return `${this.baseUrl}/api/v1/servers/${this.encodedServerKey}/projects/${this.encodedProjectKey}/better-harness`;
+  }
+
+  private getHeaders(): Record<string, string> {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (this.authToken) {
+      headers["Authorization"] = `Bearer ${this.authToken}`;
+    }
+    return headers;
   }
 
   private async jsonRequest<T>(
@@ -81,10 +94,12 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     const url = `${this.apiBase}${path}`;
     const res = await fetch(url, {
       method,
-      headers: { "Content-Type": "application/json" },
+      headers: this.getHeaders(),
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal,
     });
+
+    if (res.status === 204 || res.status === 404) return undefined as T;
 
     if (!res.ok) {
       let errorBody: string;
@@ -95,8 +110,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       }
       throw new Error(`Harness API error (${res.status}): ${errorBody || res.statusText}`);
     }
-
-    if (res.status === 204) return undefined as T;
 
     return res.json() as Promise<T>;
   }
@@ -149,6 +162,9 @@ export class HttpHarnessDataSource implements HarnessDataSource {
         },
         this.runAbortController.signal
       );
+      if (result.accepted && result.runId) {
+        this.currentRunId = result.runId;
+      }
       return { accepted: result.accepted, runId: result.runId };
     } catch (err) {
       if ((err as Error).name === "AbortError") {
@@ -272,6 +288,15 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async cancel(): Promise<void> {
+    // Cancel via the current run ID first
+    if (this.currentRunId) {
+      try {
+        await this.jsonRequest<void>("POST", `/runs/${encodeURIComponent(this.currentRunId)}/cancel`);
+      } catch {
+        // Best-effort cancellation
+      }
+    }
+
     // Cancel any in-flight regeneration
     if (this.runAbortController) {
       this.runAbortController.abort();
@@ -284,12 +309,7 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       this.progressEventSource = null;
     }
 
-    // Also notify the server
-    try {
-      await this.jsonRequest<void>("POST", "/runs/current/cancel");
-    } catch {
-      // Best-effort cancellation; network errors are acceptable
-    }
+    this.currentRunId = undefined;
   }
 
   /**
@@ -310,16 +330,30 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     const eventSource = new EventSource(url);
     this.progressEventSource = eventSource;
 
-    const handleMessage = (event: MessageEvent) => {
+    // Named event listeners matching the SSE contract
+    const eventTypes = ["run.queued", "run.started", "run.progress", "collector.started", "collector.completed", "analysis.started", "finding.created", "report.completed", "run.cancelled", "run.failed"];
+
+    for (const type of eventTypes) {
+      eventSource.addEventListener(type, ((e: MessageEvent) => {
+        try {
+          const parsed = JSON.parse(e.data) as SSEEvent;
+          onEvent(parsed);
+        } catch {
+          onEvent({ type, data: e.data });
+        }
+      }) as EventListener);
+    }
+
+    // Fallback to onmessage for unnamed events
+    eventSource.onmessage = (e: MessageEvent) => {
       try {
-        const parsed = JSON.parse(event.data) as SSEEvent;
+        const parsed = JSON.parse(e.data) as SSEEvent;
         onEvent(parsed);
       } catch {
-        onEvent({ type: "raw", data: event.data });
+        onEvent({ type: "raw", data: e.data });
       }
     };
 
-    eventSource.onmessage = handleMessage;
     if (onError) {
       eventSource.onerror = onError;
     }

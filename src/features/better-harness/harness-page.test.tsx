@@ -141,7 +141,7 @@ describe("Better Harness", () => {
       const source = new HttpHarnessDataSource({
         baseUrl: "http://localhost:8080",
         serverKey: "main-server",
-        projectDir: "/workspace/test",
+        projectKey: "test-project",
       });
       expect(source).toBeDefined();
     });
@@ -150,7 +150,7 @@ describe("Better Harness", () => {
       const source = new HttpHarnessDataSource({
         baseUrl: "http://localhost:1",
         serverKey: "main-server",
-        projectDir: "/workspace/test",
+        projectKey: "test-project",
       });
       const avail = await source.availability();
       expect(avail.available).toBe(false);

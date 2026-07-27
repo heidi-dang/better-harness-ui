@@ -1,5 +1,6 @@
 import React, { useEffect } from "react";
 import { useHarness, HarnessProvider } from "../context/harness-context";
+import { HttpHarnessDataSourceConfig } from "../api/http-harness-data-source";
 import { HarnessHeader } from "../components/harness-header";
 import { HarnessOverallScore } from "../components/harness-overall-score";
 import { HarnessDimensionGrid } from "../components/harness-dimension-grid";
@@ -220,11 +221,12 @@ function BetterHarnessPageContent() {
 export interface BetterHarnessPageProps {
   serverKey?: string;
   projectDir: string;
+  httpConfig?: HttpHarnessDataSourceConfig;
 }
 
-export function BetterHarnessPage({ serverKey, projectDir }: BetterHarnessPageProps) {
+export function BetterHarnessPage({ serverKey, projectDir, httpConfig }: BetterHarnessPageProps) {
   return (
-    <HarnessProvider serverKey={serverKey} projectDir={projectDir}>
+    <HarnessProvider serverKey={serverKey} projectDir={projectDir} httpConfig={httpConfig}>
       <BetterHarnessPageContent />
     </HarnessProvider>
   );

@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import BetterHarnessPage from "./features/better-harness/pages/better-harness-page";
 import { parseHarnessRoute, buildHarnessRoute } from "./features/better-harness/utils/harness-route";
+import { HttpHarnessDataSourceConfig } from "./features/better-harness/api/http-harness-data-source";
 import { Command, Server, FolderGit2, Sparkles, RefreshCw } from "lucide-react";
 
 export default function App() {
@@ -30,10 +31,22 @@ export default function App() {
   }, []);
 
   const routeInfo = parseHarnessRoute(currentPath);
-
-  // Default server and project if navigating to root /
   const serverKey = routeInfo.serverKey || "main-server";
   const projectDir = routeInfo.projectDir || "/workspace/opencode-web-ui";
+
+  // Build httpConfig for production backend connection
+  const httpConfig = useMemo<HttpHarnessDataSourceConfig | undefined>(() => {
+    // Use FlowDeck API base URL from env, or default to localhost
+    const baseUrl = import.meta.env.VITE_HARNESS_API_URL || "http://127.0.0.1:0";
+    if (!serverKey || !projectDir) return undefined;
+    return {
+      baseUrl,
+      serverKey,
+      projectKey: btoa(projectDir).replace(/[+/=]/g, "_"),
+      projectDir,
+      authToken: import.meta.env.VITE_HARNESS_AUTH_TOKEN || undefined,
+    };
+  }, [serverKey, projectDir]);
 
   const navigateTo = (newServer: string | undefined, newDir: string) => {
     const newRoute = buildHarnessRoute(newServer, newDir);
@@ -118,7 +131,7 @@ export default function App() {
       </nav>
 
       {/* Main Page Component */}
-      <BetterHarnessPage serverKey={serverKey} projectDir={projectDir} />
+      <BetterHarnessPage serverKey={serverKey} projectDir={projectDir} httpConfig={httpConfig} />
 
       {/* Command Palette Modal */}
       {showCommandPalette && (
