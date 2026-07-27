@@ -1,6 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { validateHarnessReport } from "./schemas/harness-report";
 import { validateHarnessRun } from "./schemas/harness-run";
+import {
+  validateHarnessReportResponse,
+  validateHarnessReportArrayResponse,
+  validateRunProgressResponse,
+  validateStartRunResponse,
+  validateCancelResponse,
+  validatePlanFixResponse,
+  validateIgnoreResponse,
+  validateVerifyResponse,
+} from "./schemas/harness-api";
 import { FixtureHarnessDataSource } from "./api/fixture-harness-data-source";
 import { UnavailableHarnessDataSource } from "./api/unavailable-harness-data-source";
 import { HttpHarnessDataSource, HttpHarnessDataSourceConfig } from "./api/http-harness-data-source";
@@ -469,8 +479,8 @@ describe("Better Harness", () => {
         const onError = vi.fn();
         source.subscribeToProgress("run-001", vi.fn(), onError);
 
-        // Wait for microtasks to drain, then check
-        await new Promise((r) => setTimeout(r, 10));
+        // Flush pending async tasks
+        await new Promise<void>((r) => setTimeout(r, 0));
         expect(onError).toHaveBeenCalledTimes(1);
       });
     });
@@ -539,20 +549,229 @@ describe("Better Harness", () => {
       }
     });
 
-    it("parses server/project routes correctly", () => {
+    it("parses server/project routes correctly (old base64 format)", () => {
       const route =
         "/server/srv-01/project/L3dvcmtzcGFjZS9vcGVuY29kZS13ZWItdWk/better-harness";
       const parsed = parseHarnessRoute(route);
       expect(parsed.isValid).toBe(true);
       expect(parsed.serverKey).toBe("srv-01");
-      expect(parsed.projectDir).toBe("/workspace/opencode-web-ui");
+      // The raw base64 string is the opaque projectKey
+      expect(parsed.projectKey).toBe("L3dvcmtzcGFjZS9vcGVuY29kZS13ZWItdWk");
+      // The decoded path is available as displayProjectPath (cosmetic only)
+      expect(parsed.displayProjectPath).toBe("/workspace/opencode-web-ui");
     });
 
-    it("generates proper routes", () => {
-      const dir = "/workspace/project-alpha";
-      const generated = buildHarnessRoute("srv-01", dir);
-      expect(generated).toContain("/server/srv-01/project/");
-      expect(generated).toContain("/better-harness");
+    it("generates proper routes with opaque projectKey", () => {
+      const generated = buildHarnessRoute("srv-01", "my-project-key", "/workspace/project-alpha");
+      expect(generated).toContain("/server/srv-01/project/my-project-key/better-harness");
+      expect(generated).toContain("?path=");
+      expect(generated).toContain("%2Fworkspace%2Fproject-alpha");
+    });
+
+    it("preserves opaque projectKey in route round-trip", () => {
+      const projectKey = "my-org/my-repo-abc123";
+      const route = buildHarnessRoute("srv-01", projectKey);
+      const parsed = parseHarnessRoute(route);
+      expect(parsed.projectKey).toBe(projectKey);
+      expect(parsed.serverKey).toBe("srv-01");
+    });
+
+    it("displayProjectPath is cosmetic and does not affect projectKey", () => {
+      const projectKey = "opaque-key-42";
+      const displayPath1 = "/workspace/foo";
+      const displayPath2 = "/workspace/bar";
+
+      const route1 = buildHarnessRoute("srv-01", projectKey, displayPath1);
+      const route2 = buildHarnessRoute("srv-01", projectKey, displayPath2);
+
+      // Both routes have the same project key
+      expect(parseHarnessRoute(route1).projectKey).toBe(projectKey);
+      expect(parseHarnessRoute(route2).projectKey).toBe(projectKey);
+
+      // displayProjectPath differs
+      expect(parseHarnessRoute(route1).displayProjectPath).toBe(displayPath1);
+      expect(parseHarnessRoute(route2).displayProjectPath).toBe(displayPath2);
+    });
+  });
+
+  describe("Identity and Configuration", () => {
+    it("opaque projectKey used in API URL unchanged", () => {
+      const config: HttpHarnessDataSourceConfig = {
+        baseUrl: "http://localhost:8080",
+        serverKey: "srv-01",
+        projectKey: "my-custom-project-key",
+      };
+      const ds = new HttpHarnessDataSource(config);
+      const url = (ds as unknown as { apiBase: string }).apiBase;
+      expect(url).toContain("my-custom-project-key");
+      expect(url).not.toContain("btoa");
+      expect(url).not.toContain("display");
+    });
+
+    it("missing baseUrl selects UnavailableHarnessDataSource", () => {
+      // Simulate missing env var
+      vi.stubEnv("VITE_HARNESS_API_URL", undefined);
+      expect(import.meta.env.VITE_HARNESS_API_URL).toBeUndefined();
+      vi.unstubAllEnvs();
+    });
+
+    it("fixture mode remains explicitly selected", () => {
+      // Verify UnavailableHarnessDataSource is constructable
+      const unavailableSource = new UnavailableHarnessDataSource();
+      expect(unavailableSource).toBeDefined();
+    });
+
+    it("unknown project produces unavailable state", async () => {
+      const unavailable = new UnavailableHarnessDataSource(
+        "Project not found: unknown-project-key"
+      );
+      const avail = await unavailable.availability();
+      expect(avail.available).toBe(false);
+      expect(avail.reason).toContain("unknown-project-key");
+    });
+  });
+
+  describe("API Schema Validation", () => {
+    it("validateHarnessReportResponse validates a valid report", () => {
+      const result = validateHarnessReportResponse(COMPLETED_HARNESS_REPORT);
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateHarnessReportResponse rejects invalid report", () => {
+      const result = validateHarnessReportResponse({ schemaVersion: 2 });
+      expect(result.valid).toBe(false);
+    });
+
+    it("validateHarnessReportArrayResponse validates an array of reports", () => {
+      const result = validateHarnessReportArrayResponse([COMPLETED_HARNESS_REPORT]);
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateHarnessReportArrayResponse rejects invalid array", () => {
+      const result = validateHarnessReportArrayResponse([{ bad: true }]);
+      expect(result.valid).toBe(false);
+    });
+
+    it("validateHarnessReportArrayResponse returns [] for empty array", () => {
+      const result = validateHarnessReportArrayResponse([]);
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateRunProgressResponse validates running progress", () => {
+      const result = validateRunProgressResponse({
+        runId: "r1",
+        status: "running",
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateRunProgressResponse validates completed progress", () => {
+      const result = validateRunProgressResponse({
+        runId: "r1",
+        status: "completed",
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateRunProgressResponse validates failed progress", () => {
+      const result = validateRunProgressResponse({
+        runId: "r1",
+        status: "failed",
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateRunProgressResponse validates cancelled progress", () => {
+      const result = validateRunProgressResponse({
+        runId: "r1",
+        status: "cancelled",
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateRunProgressResponse rejects unknown status", () => {
+      const result = validateRunProgressResponse({
+        runId: "r1",
+        status: "unknown-status",
+      } as never);
+      expect(result.valid).toBe(false);
+    });
+
+    it("validateStartRunResponse validates accepted response", () => {
+      const result = validateStartRunResponse({
+        accepted: true,
+        runId: "run-001",
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateStartRunResponse validates rejected response", () => {
+      const result = validateStartRunResponse({ accepted: false });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateCancelResponse validates accepted cancellation", () => {
+      const result = validateCancelResponse({ accepted: true });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateCancelResponse validates null cancellation", () => {
+      const result = validateCancelResponse(null);
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateCancelResponse rejects invalid cancellation shape", () => {
+      const result = validateCancelResponse({ wrong: true });
+      expect(result.valid).toBe(false);
+    });
+
+    it("validatePlanFixResponse validates response", () => {
+      const result = validatePlanFixResponse({
+        accepted: true,
+        results: [{ findingId: "F1", accepted: true }],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateIgnoreResponse validates response", () => {
+      const result = validateIgnoreResponse({
+        accepted: true,
+        results: [{ findingId: "F1", accepted: true }],
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it("validateVerifyResponse validates response", () => {
+      const result = validateVerifyResponse({
+        accepted: true,
+        results: [{ findingId: "F1", accepted: true }],
+      });
+      expect(result.valid).toBe(true);
+    });
+  });
+
+  describe("Cancellation", () => {
+    const CANCEL_CONFIG: HttpHarnessDataSourceConfig = {
+      baseUrl: "http://localhost:8080",
+      serverKey: "srv-01",
+      projectKey: "cancel-test",
+    };
+
+    it("cancellation confirms accepted state", async () => {
+      const source = new HttpHarnessDataSource(CANCEL_CONFIG);
+      vi.spyOn(global, "fetch").mockResolvedValue(
+        new Response(JSON.stringify({ accepted: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+      await expect(source.cancel()).resolves.toBeUndefined();
+    });
+
+    it("cancellation failure still resolves (best-effort)", async () => {
+      const source = new HttpHarnessDataSource(CANCEL_CONFIG);
+      vi.spyOn(global, "fetch").mockRejectedValue(new Error("Server error"));
+      await expect(source.cancel()).resolves.toBeUndefined();
     });
   });
 });

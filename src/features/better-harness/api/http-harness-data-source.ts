@@ -417,6 +417,17 @@ export class HttpHarnessDataSource implements HarnessDataSource {
         let currentEventType = "message";
         let currentData = "";
 
+        const dispatchEvent = () => {
+          try {
+            const parsed = JSON.parse(currentData);
+            onEvent({ type: currentEventType, data: parsed });
+          } catch {
+            onEvent({ type: currentEventType, data: currentData });
+          }
+          currentEventType = "message";
+          currentData = "";
+        };
+
         const processLines = (text: string) => {
           const lines = text.split("\n");
           for (const line of lines) {
@@ -426,14 +437,7 @@ export class HttpHarnessDataSource implements HarnessDataSource {
               currentData = line.slice(6);
             } else if (line === "" && currentData) {
               // Empty line = end of event, dispatch
-              try {
-                const parsed = JSON.parse(currentData);
-                onEvent({ type: currentEventType, data: parsed });
-              } catch {
-                onEvent({ type: currentEventType, data: currentData });
-              }
-              currentEventType = "message";
-              currentData = "";
+              dispatchEvent();
             }
           }
         };
@@ -450,12 +454,17 @@ export class HttpHarnessDataSource implements HarnessDataSource {
 
           for (const part of parts) {
             processLines(part);
+            // Parts are delimited by \n\n, so each is a complete event
+            if (currentData) {
+              dispatchEvent();
+            }
           }
         }
 
-        // Process remaining buffer
+        // Process remaining buffer (incomplete — no trailing blank line)
         if (buffer.trim()) {
           processLines(buffer);
+          // Do NOT dispatch — buffer may be incomplete (no \n\n boundary yet)
         }
       } catch {
         if (signal.aborted) return; // Intentional cancellation, not an error
