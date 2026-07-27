@@ -85,6 +85,24 @@ export type SSEEvent = z.infer<typeof SSEEventSchema>;
 
 // ── Response validators that preserve full error context ───────────────
 
+export const CancelResponseSchema = z
+  .object({
+    accepted: z.boolean(),
+  })
+  .strict()
+  .optional()
+  .or(z.null());
+
+export type CancelResponse = z.infer<typeof CancelResponseSchema>;
+
+export function validateCancelResponse(
+  data: unknown
+): { valid: true; value: void } | { valid: false; error: string } {
+  const result = CancelResponseSchema.safeParse(data);
+  if (result.success) return { valid: true, value: undefined };
+  return { valid: false, error: formatZodIssues("CancelResponse", result.error.issues) };
+}
+
 export function validateAvailabilityResponse(
   data: unknown
 ): { valid: true; value: AvailabilityResponse } | { valid: false; error: string } {

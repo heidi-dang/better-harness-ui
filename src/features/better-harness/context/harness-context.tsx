@@ -121,14 +121,17 @@ export function HarnessProvider({
   const [rawReport, setRawReport] = useState<unknown>(undefined);
   const [progress, setProgress] = useState<HarnessRunProgress | undefined>(undefined);
   const progressUnsubscribeRef = useRef<(() => void) | null>(null);
-  const progressPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const progressPollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pollingActiveRef = useRef(false);
+  const hasSelectedInitialFinding = useRef(false);
 
   /** Deterministic polling cleanup: stops polling timer and clears the ref. */
   const stopPolling = useCallback(() => {
     if (progressPollingRef.current) {
-      clearInterval(progressPollingRef.current);
+      clearTimeout(progressPollingRef.current);
       progressPollingRef.current = null;
     }
+    pollingActiveRef.current = false;
   }, []);
 
   // Data source selection
@@ -174,7 +177,8 @@ export function HarnessProvider({
           setReport(undefined);
         } else {
           setReport(validation.report);
-          if (validation.report?.findings.length && !selectedFindingId) {
+          if (validation.report?.findings.length && !hasSelectedInitialFinding.current) {
+            hasSelectedInitialFinding.current = true;
             setSelectedFindingId(validation.report.findings[0].id);
           }
         }
@@ -187,12 +191,14 @@ export function HarnessProvider({
     } finally {
       setIsLoading(false);
     }
-  }, [dataSource, selectedFindingId]);
+  }, [dataSource]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadData();
-  }, [loadData, serverKey, projectDir]);
+    // Re-fetch when serverKey or projectDir changes (mounts a different data source)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dataSource, serverKey, projectDir]);
 
   const setDemoMode = useCallback((mode: HarnessDemoMode | undefined) => {
     setDemoModeState(mode);
@@ -210,6 +216,38 @@ export function HarnessProvider({
   const refreshReport = useCallback(async () => {
     await loadData();
   }, [loadData]);
+
+  const startPollingFallback = useCallback(() => {
+    if (pollingActiveRef.current) return;
+    pollingActiveRef.current = true;
+
+    const poll = async () => {
+      if (!pollingActiveRef.current) return;
+
+      try {
+        const prog = await dataSource.getRunProgress?.();
+        if (prog) {
+          setProgress(prog);
+          if (prog.status === "completed" || prog.status === "failed" || prog.status === "cancelled") {
+            stopPolling();
+            loadData();
+            return;
+          }
+        }
+        // prog === undefined (404/204) → keep polling
+        // (run may still be initializing or was just cancelled)
+      } catch {
+        // Request error → keep polling (but don't start overlapping loops)
+      }
+
+      // Schedule next poll only after the current one resolves
+      if (pollingActiveRef.current) {
+        progressPollingRef.current = setTimeout(poll, 5000);
+      }
+    };
+
+    progressPollingRef.current = setTimeout(poll, 2000);
+  }, [dataSource, loadData, stopPolling]);
 
   const regenerateAnalysis = useCallback(async () => {
     try {
@@ -237,11 +275,8 @@ export function HarnessProvider({
             progressUnsubscribeRef.current = httpSource.subscribeToProgress(
               res.runId,
               (event) => {
-                if (event.type === "run.progress" || event.type === "raw") {
-                  const progressData = event.data as HarnessRunProgress;
-                  if (progressData?.status) {
-                    setProgress(progressData);
-                  }
+                if (event.type === "run.progress") {
+                  setProgress(event.data as HarnessRunProgress);
                 }
                 if (event.type === "report.completed" || event.type === "run.failed" || event.type === "run.cancelled") {
                   // Run finished — stop polling, unsubscribe, and reload
@@ -256,26 +291,7 @@ export function HarnessProvider({
               () => {
                 // SSE error: clean up subscription, start polling fallback
                 progressUnsubscribeRef.current = null;
-
-                if (!progressPollingRef.current) {
-                  progressPollingRef.current = setInterval(async () => {
-                    try {
-                      const prog = await dataSource.getRunProgress?.();
-                      if (prog) {
-                        setProgress(prog);
-                        // Stop polling and reload when run reaches a terminal state
-                        if (prog.status === "completed" || prog.status === "failed") {
-                          stopPolling();
-                          loadData();
-                        }
-                      }
-                      // prog === undefined (404/204) → keep polling
-                      // (run may still be initializing or was just cancelled)
-                    } catch {
-                      // Request error → keep polling, don't create overlapping intervals
-                    }
-                  }, 5000);
-                }
+                startPollingFallback();
               }
             );
 
@@ -295,7 +311,7 @@ export function HarnessProvider({
         type: "warning",
       });
     }
-  }, [dataSource, loadData, stopPolling]);
+  }, [dataSource, loadData, stopPolling, startPollingFallback]);
 
   const planFixForFinding = useCallback(
     async (findingId: string) => {

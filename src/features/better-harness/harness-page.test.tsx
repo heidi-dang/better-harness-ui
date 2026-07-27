@@ -1,9 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { validateHarnessReport } from "./schemas/harness-report";
 import { validateHarnessRun } from "./schemas/harness-run";
 import { FixtureHarnessDataSource } from "./api/fixture-harness-data-source";
 import { UnavailableHarnessDataSource } from "./api/unavailable-harness-data-source";
-import { HttpHarnessDataSource } from "./api/http-harness-data-source";
+import { HttpHarnessDataSource, HttpHarnessDataSourceConfig } from "./api/http-harness-data-source";
 import { filterAndSortFindings } from "./utils/finding-filters";
 import {
   encodeProjectDir,
@@ -145,13 +145,11 @@ describe("Better Harness", () => {
     };
 
     function mockFetchResponse(body: unknown, status = 200, statusText = "OK") {
-      return Promise.resolve(
-        new Response(JSON.stringify(body), {
-          status,
-          statusText,
-          headers: { "Content-Type": "application/json" },
-        })
-      );
+      return new Response(JSON.stringify(body), {
+        status,
+        statusText,
+        headers: { "Content-Type": "application/json" },
+      });
     }
 
     beforeEach(() => {
@@ -405,7 +403,6 @@ describe("Better Harness", () => {
         mockResponse: Response;
         readerCancel: ReturnType<typeof vi.fn>;
       } {
-        const encoder = new TextEncoder();
         const readerCancel = vi.fn();
 
         const mockReader = {

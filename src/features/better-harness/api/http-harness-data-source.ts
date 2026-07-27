@@ -11,6 +11,7 @@ import {
   validatePlanFixResponse,
   validateIgnoreResponse,
   validateVerifyResponse,
+  validateCancelResponse,
   validateHarnessReportResponse,
   validateHarnessReportArrayResponse,
   validateRunProgressResponse,
@@ -117,10 +118,10 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     const json: unknown = await res.json();
     const validation = validate(json);
     if (!validation.valid) {
-      throw new Error(`Harness API schema error: ${validation.error}`);
+      throw new Error(`Harness API schema error: ${(validation as { valid: false; error: string }).error}`);
     }
 
-    return validation.value;
+    return (validation as { valid: true; value: T }).value;
   }
 
   /**
@@ -340,22 +341,11 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   async cancel(): Promise<void> {
     // Cancel via the current run ID first
     if (this.currentRunId) {
-      try {
-        await this.validatedRequest(
-          "POST",
-          `/runs/${encodeURIComponent(this.currentRunId)}/cancel`,
-          // Cancel responses are empty or just { accepted: boolean }
-          (data: unknown) => {
-            if (data === null || data === undefined) {
-              return { valid: true, value: undefined as void };
-            }
-            // Accept simple success response
-            return { valid: true, value: undefined as void };
-          }
-        );
-      } catch {
-        // Best-effort cancellation
-      }
+      await this.validatedRequest(
+        "POST",
+        `/runs/${encodeURIComponent(this.currentRunId)}/cancel`,
+        validateCancelResponse
+      );
     }
 
     // Cancel any in-flight regeneration
@@ -463,7 +453,7 @@ export class HttpHarnessDataSource implements HarnessDataSource {
         if (buffer.trim()) {
           processLines(buffer);
         }
-      } catch (err) {
+      } catch {
         if (signal.aborted) return; // Intentional cancellation, not an error
         if (onError) {
           onError(new Event("error"));

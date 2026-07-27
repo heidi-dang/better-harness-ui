@@ -103,10 +103,10 @@ export interface HarnessReport {
 
 export interface HarnessRunProgress {
   runId: string;
-  status: "queued" | "running" | "completed" | "failed";
-  stage: string;
-  progressPercent: number;
-  startedAt: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  stage?: string;
+  progressPercent?: number;
+  startedAt?: string;
   estimatedTimeRemainingSeconds?: number;
   errorMessage?: string;
 }
