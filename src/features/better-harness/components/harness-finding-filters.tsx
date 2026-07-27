@@ -67,7 +67,7 @@ export function HarnessFindingFilters() {
       </div>
 
       {/* Filter Dropdowns Grid */}
-      <div className="grid grid-cols-1 xs:grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 pt-2 border-t border-slate-800/80">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 pt-2 border-t border-slate-800/80">
         {/* Dimension Filter */}
         <div>
           <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1">
@@ -173,7 +173,7 @@ export function HarnessFindingFilters() {
         </div>
 
         {/* Sort By */}
-        <div className="xs:col-span-2 sm:col-span-1">
+        <div className="sm:col-span-2 md:col-span-1">
           <label className="block text-[10px] font-semibold uppercase text-slate-400 mb-1 flex items-center justify-between">
             <span>Sort By</span>
             <button
@@ -183,10 +183,11 @@ export function HarnessFindingFilters() {
                   sortOrder: prev.sortOrder === "asc" ? "desc" : "asc",
                 }))
               }
-              className="text-[10px] text-sky-400 hover:underline flex items-center gap-0.5 py-0.5"
+              className="text-[10px] text-sky-400 hover:text-sky-300 flex items-center gap-1 px-2 py-1.5 rounded-md hover:bg-sky-500/10 min-h-[44px]"
               title="Toggle sort direction"
+              aria-label={`Sort direction: ${filters.sortOrder === "asc" ? "ascending" : "descending"}. Click to toggle.`}
             >
-              <ArrowUpDown className="w-2.5 h-2.5" />
+              <ArrowUpDown className="w-3 h-3" />
               {filters.sortOrder.toUpperCase()}
             </button>
           </label>

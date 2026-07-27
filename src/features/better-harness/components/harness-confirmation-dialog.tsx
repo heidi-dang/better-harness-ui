@@ -101,6 +101,7 @@ export function HarnessConfirmationDialog({
       aria-labelledby="confirmation-dialog-title"
       aria-describedby="confirmation-dialog-description"
       className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in"
+      style={{ paddingTop: "max(1rem, env(safe-area-inset-top, 0px))", paddingRight: "max(1rem, env(safe-area-inset-right, 0px))", paddingBottom: "max(1rem, env(safe-area-inset-bottom, 0px))", paddingLeft: "max(1rem, env(safe-area-inset-left, 0px))" }}
       onClick={() => {
         if (!isLoading) onClose();
       }}

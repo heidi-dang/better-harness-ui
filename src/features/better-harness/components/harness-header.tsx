@@ -66,10 +66,10 @@ export function HarnessHeader() {
           </span>
           <button
             onClick={() => setActionMessage(null)}
-            className="text-slate-400 hover:text-white text-xs px-1"
+            className="text-slate-400 hover:text-white flex items-center justify-center min-h-[44px] min-w-[44px] rounded-md hover:bg-white/5"
             aria-label="Dismiss message"
           >
-            ✕
+            <span className="text-sm leading-none">✕</span>
           </button>
         </div>
       )}
@@ -133,12 +133,12 @@ export function HarnessHeader() {
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 w-full sm:w-auto">
             {/* Environment/Demo Mode Selector */}
-            <div className="flex items-center gap-1.5 bg-slate-900/90 px-2.5 py-1.5 rounded-lg border border-slate-800 text-xs text-slate-300 min-h-[44px]">
+            <div className="flex items-center gap-1.5 bg-slate-900/90 px-2.5 rounded-lg border border-slate-800 text-xs text-slate-300 min-h-[44px] w-full">
               <SlidersHorizontal className="w-4 h-4 text-slate-400 shrink-0" />
               <select
                 value={demoMode || "production"}
                 onChange={handleDemoChange}
-                className="bg-transparent text-slate-200 text-xs focus:outline-none cursor-pointer w-full truncate"
+                className="bg-transparent text-slate-200 text-xs focus:outline-none cursor-pointer w-full truncate h-[44px]"
                 aria-label="Select Harness demo state"
               >
                 <option value="production" className="bg-slate-900 text-slate-200">

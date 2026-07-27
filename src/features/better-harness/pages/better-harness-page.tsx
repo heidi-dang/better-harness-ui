@@ -189,6 +189,7 @@ function BetterHarnessPageContent() {
           <div
             ref={drawerRef}
             className="w-full max-w-lg bg-[var(--v2-bg-surface-raised,#16181d)] h-full overflow-y-auto p-4 space-y-4 shadow-2xl relative flex flex-col"
+            style={{ paddingTop: "max(1rem, env(safe-area-inset-top, 0px))", paddingRight: "max(1rem, env(safe-area-inset-right, 0px))", paddingBottom: "max(1rem, env(safe-area-inset-bottom, 0px))", paddingLeft: "max(1rem, env(safe-area-inset-left, 0px))" }}
           >
             {/* Sticky Mobile Header */}
             <div className="sticky top-0 bg-[var(--v2-bg-surface-raised,#16181d)] z-10 py-2 border-b border-slate-800 flex items-center justify-between">

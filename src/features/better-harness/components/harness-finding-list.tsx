@@ -52,7 +52,7 @@ export function HarnessFindingList() {
       <div className="bg-[var(--v2-bg-surface-raised,#16181d)] border border-[var(--v2-border-subtle,#262930)] rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 text-xs">
         <button
           onClick={selectAllFindings}
-          className="flex items-center gap-2 text-slate-300 hover:text-white font-medium transition-colors min-h-[36px]"
+          className="flex items-center gap-2 text-slate-300 hover:text-white font-medium transition-colors min-h-[44px] px-2 rounded-md hover:bg-slate-800/60"
         >
           {allSelected ? (
             <CheckSquare className="w-4 h-4 text-sky-400" />
