@@ -42,14 +42,12 @@ function killProcessTree(proc) {
     try { execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
   } else {
     try { proc.kill("SIGTERM"); } catch {}
-    // Give the process a brief window to handle SIGTERM before SIGKILL
-    const deadline = Date.now() + 3_000;
-    while (Date.now() < deadline && proc.exitCode === null) {
-      // busy-wait — simplest cross-platform approach
-    }
-    if (proc.exitCode === null) {
-      try { proc.kill("SIGKILL"); } catch {}
-    }
+    // Wait for graceful shutdown (event-driven, not busy-wait)
+    waitForExit(proc, 3_000).then((result) => {
+      if (result.timedOut) {
+        try { proc.kill("SIGKILL"); } catch {}
+      }
+    });
   }
 }
 
@@ -75,8 +73,14 @@ async function shutdown() {
   // state directory ourselves.
   for (const proc of PROCESSES) killProcessTree(proc);
 
-  // Brief pause for kills to take effect
-  await new Promise((r) => setTimeout(r, 1_500));
+  // Wait for children to exit (bounded by deadline) — poll exitCode without
+  // blocking the event loop, instead of a fixed-duration sleep.
+  const WAIT_DEADLINE = Date.now() + 5_000;
+  while (Date.now() < WAIT_DEADLINE) {
+    const allExited = PROCESSES.every((p) => p.exitCode !== null);
+    if (allExited) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
 
   // Verify and remove the server's temporary directories
   let clean = true;

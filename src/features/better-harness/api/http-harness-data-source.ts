@@ -5,7 +5,6 @@ import {
   BatchVerifyResult,
 } from "./harness-data-source";
 import { HarnessReport, HarnessRunProgress } from "../types";
-import type { SSESupportedEvent } from "../schemas/harness-api";
 import {
   validateAvailabilityResponse,
   validateStartRunResponse,
@@ -16,7 +15,6 @@ import {
   validateHarnessReportResponse,
   validateHarnessReportArrayResponse,
   validateRunProgressResponse,
-  ValidatedHttpResult,
   SSEEnvelopeSchema,
   getPayloadValidator,
   type ValidatedHttpResult,
@@ -437,10 +435,28 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       currentData: [],
       currentId: undefined,
     };
+    this._ssePendingCR = false;
   }
+
+  /** Tracks whether the previously processed chunk ended with a lone \r. */
+  private _ssePendingCR = false;
 
   /**
    * Parse an SSE frame line by line according to the SSE specification.
+   *
+   * Line-ending normalisation (applied IN ORDER):
+   *   1. If the previous chunk ended with a lone \r and this chunk starts
+   *      with \n, consume the leading \n (the pair is one line terminator).
+   *   2. Replace every \r\n pair within the chunk with \n.
+   *   3. Replace every remaining \r with \n.
+   *   4. If the ORIGINAL chunk ends with \r, set the pending-CR flag so
+   *      that the next call can merge with a leading \n.
+   *
+   * This correctly handles:
+   *   - \r\n within a single chunk
+   *   - \r split across two chunks (\r … \n)
+   *   - Lone \r as a line terminator
+   *   - Multiple line-ending styles in one stream
    */
   private parseSSEChunk(
     chunk: string,
@@ -448,8 +464,29 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   ): void {
     if (!this.sseParserState) return;
 
-    // Normalize CRLF to LF (SSE spec allows both)
-    this.sseParserState.buffer += chunk.replace(/\r\n/g, "\n");
+    let normalized = chunk;
+
+    // 1. Consume leading \n if previous chunk ended with \r
+    if (this._ssePendingCR && normalized.startsWith("\n")) {
+      normalized = normalized.slice(1);
+    }
+    this._ssePendingCR = false;
+
+    // 2. Normalise CRLF pairs within the chunk
+    normalized = normalized.replace(/\r\n/g, "\n");
+
+    // 3. Determine trailing \r BEFORE replacing lone \r
+    const endsWithLoneCR = normalized.endsWith("\r") && !normalized.endsWith("\r\n");
+
+    // 4. Replace remaining lone \r
+    normalized = normalized.replace(/\r/g, "\n");
+
+    // 5. Set pending flag for next chunk
+    if (endsWithLoneCR) {
+      this._ssePendingCR = true;
+    }
+
+    this.sseParserState.buffer += normalized;
 
     let lineStart = 0;
     const buf = this.sseParserState.buffer;
@@ -655,11 +692,13 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     } catch (err) {
       if (signal?.aborted) return false;
 
-      // Attempt auth refresh for 401/403 — detect by string since fetch throws for HTTP errors
+      // Attempt auth refresh for 401/403 — detect by string since fetch throws for HTTP errors.
+      // NB: parentheses around the OR group are REQUIRED because &&
+      //    binds tighter than || in JS.  Without them, attempt === 1
+      //    would only gate the 401 path, not the 403 path.
       if (
         attempt === 1 &&
-        (err as Error).message?.includes("401") ||
-        (err as Error).message?.includes("403")
+        ((err as Error).message?.includes("401") || (err as Error).message?.includes("403"))
       ) {
         if (this.onAuthFailure) {
           try {

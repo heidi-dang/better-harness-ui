@@ -220,6 +220,55 @@ describe("Better Harness SSE", () => {
       unsubscribe();
     });
 
+    it("handles CRLF split across two chunks (r at end, n at start)", async () => {
+      // \r at end of chunk 1 terminates the data line, \n at start of
+      // chunk 2 is consumed as the pending-CR merge, then a final \n
+      // serves as the frame separator.
+      const envelope = JSON.stringify({
+        type: "run.progress",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        data: progressPayload(),
+      });
+      const part1 = "event: run.progress\r\ndata: " + envelope + "\r";
+      const part2 = "\n\n"; // merge pending \r with first \n, second \n = empty line
+      const response = sseResponseFromChunks([part1, part2]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "run.progress" }),
+      );
+      unsubscribe();
+    });
+
+    it("handles lone r line terminator", async () => {
+      const envelope = JSON.stringify({
+        type: "run.progress",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        data: progressPayload(),
+      });
+      // Lone \r as line terminator (no \n after it)
+      const chunk = "event: run.progress\rdata: " + envelope + "\r\r";
+      const response = sseResponseFromChunks([chunk]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "run.progress" }),
+      );
+      unsubscribe();
+    });
+
+    // (duplicate of "delivers multiple events in one chunk" above — removed)
+
     it("ignores comment lines", async () => {
       const response = sseResponseFromChunks([
         ": this is a comment\n" +

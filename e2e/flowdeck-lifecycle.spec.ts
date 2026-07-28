@@ -61,7 +61,7 @@ test.describe("FlowDeck HTTP API", () => {
     expect(body.accepted).toBe(true);
     expect(body.runId).toBeDefined();
     expect(typeof body.runId).toBe("string");
-  }, 30_000);
+  });
 
   test("GET exact run returns persisted state", async () => {
     // Start a run first
@@ -93,9 +93,9 @@ test.describe("FlowDeck HTTP API", () => {
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs/${runId}`,
     );
     expect(getRes.status).toBe(200);
-  }, 30_000);
+  });
 
-  test("SSE replay delivers run.progress with validated envelope and matching runId", async ({}, testInfo) => {
+  test("SSE replay delivers run.progress with validated envelope and matching runId", async (_fixtures, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
 
@@ -168,7 +168,7 @@ test.describe("FlowDeck HTTP API", () => {
     }
   });
 
-  test("dedicated SSE connection delivers mandatory heartbeat", async ({}, testInfo) => {
+  test("dedicated SSE connection delivers mandatory heartbeat", async (_fixtures, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
     const httpServerUrl = new URL(BASE_URL);
@@ -214,7 +214,7 @@ test.describe("FlowDeck HTTP API", () => {
     }
   });
 
-  test("SSE Last-Event-ID correctly filters replayed events", async ({}, testInfo) => {
+  test("SSE Last-Event-ID correctly filters replayed events", async (_fixtures, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
 
@@ -252,40 +252,57 @@ test.describe("FlowDeck HTTP API", () => {
       req.on("error", () => { clearTimeout(timer); resolve(data); });
     });
 
-    // 1. Connect with Last-Event-ID=0 → replays ALL persisted events
+    // ---- Full replay assertion ----
     const fullReplay = await readSSE("0");
-    const fullEvents = fullReplay.split("\n").filter(l => l.startsWith("event:"));
-    console.log(`  Full replay (${fullEvents.length} events): [${fullEvents.join(", ")}]`);
-    expect(fullEvents.some(e => e.includes("run."))).toBe(true);
 
-    // Assert no duplicate IDs in the replayed batch.  The connected frame
-    // (freshly assigned) may have a higher sequence ID than replayed events
-    // because the sequence counter is global, so we split: the first id is
-    // the fresh connected frame; all subsequent ids are from the event log
-    // and must be strictly increasing (the log appends with monotonic IDs).
-    const allIds = [...fullReplay.matchAll(/^id: (\d+)/gm)].map(m => parseInt(m[1], 10));
-    const uniqueIds = new Set(allIds);
-    expect(allIds.length).toBe(uniqueIds.size);
-    // Replayed IDs (all after the first) must be strictly increasing
-    if (allIds.length > 1) {
-      const replayedIds = allIds.slice(1);
-      expect(replayedIds.every((id, i) => i === 0 || id > replayedIds[i - 1])).toBe(true);
-    }
-    const maxId = Math.max(...allIds);
+    // 1. Connected and heartbeat frames have no `id:` field
+    const connectedLines = fullReplay.split("\n").filter(l => l.startsWith("event: connected"));
+    expect(connectedLines.length).toBe(1);
+    const connectedBlock = fullReplay.split("\n\n")[0];
+    expect(connectedBlock).not.toMatch(/^id: /m);
 
-    // 2. Connect with Last-Event-ID = maxId → should NOT replay any of those events
-    const emptyReplay = await readSSE(String(maxId), 3_000);
-    const emptyEvents = emptyReplay.split("\n").filter(l => l.startsWith("event:"));
-    console.log(`  Empty replay (lastId=${maxId}): [${emptyEvents.join(", ")}]`);
+    // 2. Replayed durable events arrive before the connected frame.
+    //    The connected frame must be the last event in the batch.
+    const allEvents = fullReplay.split("\n").filter(l => l.startsWith("event:"));
+    const connectedIdx = allEvents.findIndex(e => e === "event: connected");
+    // The connected frame should be at the end; everything before it is replay
+    expect(connectedIdx).toBe(allEvents.length - 1);
 
-    // The second connection gets a fresh connected frame, but no run.* events
-    const runEventsAfter = emptyEvents.filter(e => e.includes("run."));
-    expect(runEventsAfter.length).toBe(0);
+    // 3. Extract durable event IDs (lines matching `id: <number>`).
+    //    Connected and heartbeat frames have no `id:` field, so only
+    //    persisted run lifecycle events are captured.
+    const durableIds = [...fullReplay.matchAll(/^id: (\d+)/gm)].map(m => parseInt(m[1], 10));
+    expect(durableIds.length).toBeGreaterThan(0);
 
-    // Also verify that the required lifecycle events are present
+    // 4. Every durable ID must be unique and strictly increasing.
+    expect(new Set(durableIds).size).toBe(durableIds.length);
+    expect(durableIds.every((id, i) => i === 0 || id > durableIds[i - 1])).toBe(true);
+
+    // 5. Required lifecycle events are present.
     expect(fullReplay).toContain("event: run.progress");
     expect(fullReplay).toContain("event: finding.created");
     expect(fullReplay).toContain("event: report.completed");
+
+    // 6. All durable IDs are > 0 (proves Last-Event-ID=0 filter works)
+    expect(durableIds.every(id => id > 0)).toBe(true);
+
+    const maxDurableId = durableIds[durableIds.length - 1];
+
+    // ---- Empty replay assertion ----
+    const emptyReplay = await readSSE(String(maxDurableId), 3_000);
+    const emptyEvents = emptyReplay.split("\n").filter(l => l.startsWith("event:"));
+    console.log(`  Empty replay (lastId=${maxDurableId}): [${emptyEvents.join(", ")}]`);
+
+    // 7. Reconnecting with Last-Event-ID = max durable ID produces no run events
+    const runEventsAfter = emptyEvents.filter(e => e.includes("run."));
+    expect(runEventsAfter.length).toBe(0);
+
+    // 8. Exactly one connected frame per connection
+    const connectedCount = emptyEvents.filter(e => e === "event: connected").length;
+    expect(connectedCount).toBe(1);
+
+    // 9. Connected frame in the second connection also has no id
+    expect(emptyReplay).not.toMatch(/^id: (\d+).*\nevent: connected/);
   });
 
   test("cancels a running run with accepted:true", async () => {
@@ -306,7 +323,7 @@ test.describe("FlowDeck HTTP API", () => {
     expect(cancelRes.status).toBe(200);
     const body: any = await cancelRes.json();
     expect(body.accepted).toBe(true);
-  }, 30_000);
+  });
 
   test("repeated cancellation returns accepted:false", async () => {
     const runRes = await fetch(
@@ -335,7 +352,7 @@ test.describe("FlowDeck HTTP API", () => {
     expect(cancel2.status).toBe(200);
     const body2: any = await cancel2.json();
     expect(body2.accepted).toBe(false);
-  }, 30_000);
+  });
 });
 
 // ─── Browser UI tests ───────────────────────────────────────────────────
@@ -568,5 +585,5 @@ test.describe("FlowDeck Plan Fix", () => {
       // Not accepted — log the error for investigation
       console.log(`  Plan Fix not accepted:`, planBody.error || planBody.results?.[0]?.error || "unknown");
     }
-  }, 30_000);
+  });
 });
