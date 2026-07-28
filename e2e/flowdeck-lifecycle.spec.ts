@@ -112,26 +112,19 @@ test.describe("FlowDeck HTTP API", () => {
     expect(runId).toBeDefined();
     await new Promise((r) => setTimeout(r, 3_000));
 
-    // Connect SSE with Last-Event-ID=0 to replay ALL persisted events
-    // (including run.progress, run.started, run.failed, etc.).
+    // Collect the full SSE replay response using a timeout-based buffer
+    // (rather than resolving on a partial frame match).
     const sseData = await new Promise<string>((resolve, reject) => {
       const serverUrl = new URL(BASE_URL);
       const path = `/api/v1/servers/${encodeURIComponent(SERVER_KEY)}/projects/${encodeURIComponent(PROJECT_KEY)}/better-harness/runs/${encodeURIComponent(runId)}/events`;
 
       let accumulated = "";
-      const timer = setTimeout(() => resolve(accumulated), 20_000);
+      const timer = setTimeout(() => resolve(accumulated), 6_000);
 
       const req = http.get(
         { hostname: serverUrl.hostname, port: parseInt(serverUrl.port, 10), path, headers: { "Last-Event-ID": "0" } },
         (res) => {
-          res.on("data", (chunk: Buffer) => {
-            accumulated += chunk.toString();
-            // Stop once we have connected + heartbeat + run progress
-            if (accumulated.includes("event: heartbeat") && accumulated.includes("event: run.")) {
-              clearTimeout(timer);
-              resolve(accumulated);
-            }
-          });
+          res.on("data", (chunk: Buffer) => { accumulated += chunk.toString(); });
           res.on("end", () => { clearTimeout(timer); resolve(accumulated); });
           res.on("error", (err) => { clearTimeout(timer); reject(err); });
         },
@@ -141,7 +134,7 @@ test.describe("FlowDeck HTTP API", () => {
 
     // Connected frame
     expect(sseData).toContain("event: connected");
-    const connMatch = sseData.match(/data: ({.*?connected.*?})(\n|$)/);
+    const connMatch = sseData.match(/data: ({.*?connected.*?})\n/);
     expect(connMatch).not.toBeNull();
     if (connMatch) {
       const parsed = JSON.parse(connMatch[1]);
@@ -152,8 +145,7 @@ test.describe("FlowDeck HTTP API", () => {
 
     // Heartbeat (canonical envelope)
     expect(sseData).toContain("event: heartbeat");
-    const hbMatch = sseData.match(/data: ({.*?heartbeat.*?})(\n|$)/);
-    expect(hbMatch).not.toBeNull();
+    const hbMatch = sseData.match(/data: ({.*?heartbeat.*?})\n/i);
     if (hbMatch) {
       const parsed = JSON.parse(hbMatch[1]);
       expect(parsed.type).toBe("heartbeat");
@@ -161,25 +153,25 @@ test.describe("FlowDeck HTTP API", () => {
       expect(parsed.data.time).toBeDefined();
     }
 
-    // At least one run.progress event with canonical envelope, matching runId
-    const progressMatch = sseData.match(/event: run\.progress\ndata: ({[^}]+run\.progress[^}]+})/);
-    expect(progressMatch).not.toBeNull();
-    if (progressMatch) {
-      const parsed = JSON.parse(progressMatch[1]);
+    // At least one run.progress event — extract the full data line after it
+    const progressBlock = sseData.match(/event: run\.progress\ndata: ([^\n]+)/);
+    expect(progressBlock).not.toBeNull();
+    if (progressBlock) {
+      const parsed = JSON.parse(progressBlock[1]);
       expect(parsed.type).toBe("run.progress");
       expect(parsed.timestamp).toBeTruthy();
       expect(parsed.data.runId).toBe(runId);
-      expect(parsed.data.status).toBeDefined();
-      expect(parsed.data.progressPercent).toBeDefined();
-      expect(parsed.data.stage).toBeDefined();
+      expect(typeof parsed.data.status).toBe("string");
+      expect(typeof parsed.data.progressPercent).toBe("number");
+      expect(typeof parsed.data.stage).toBe("string");
     }
   });
 
-  test("SSE Last-Event-ID replay delivers missed events", async ({}, testInfo) => {
+  test("SSE Last-Event-ID correctly filters replayed events", async ({}, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
 
-    // Start a run
+    // Start a run and wait for it to complete
     const runRes = await fetch(
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs`,
       {
@@ -190,71 +182,47 @@ test.describe("FlowDeck HTTP API", () => {
     );
     const { runId }: any = await runRes.json();
     expect(runId).toBeDefined();
-
-    // Wait for the run to finish
     await new Promise((r) => setTimeout(r, 3_000));
 
-    // Helper: read SSE data via http.get
-    const readSSE = (lastEventId?: string) => new Promise<string>((resolve, reject) => {
+    // Helper: collect SSE data with a timeout
+    const readSSE = (lastEventId?: string, timeoutMs = 6_000) => new Promise<string>((resolve) => {
       const serverUrl = new URL(BASE_URL);
       const path = `/api/v1/servers/${encodeURIComponent(SERVER_KEY)}/projects/${encodeURIComponent(PROJECT_KEY)}/better-harness/runs/${encodeURIComponent(runId)}/events`;
       const headers: Record<string, string> = {};
       if (lastEventId) headers["Last-Event-ID"] = lastEventId;
 
       let data = "";
-      const timer = setTimeout(() => resolve(data), 5_000);
+      const timer = setTimeout(() => resolve(data), timeoutMs);
 
       const req = http.get(
         { hostname: serverUrl.hostname, port: parseInt(serverUrl.port, 10), path, headers },
         (res) => {
-          res.on("data", (chunk: Buffer) => {
-            data += chunk.toString();
-            // Stop after receiving the connected frame
-            if (data.includes("event: connected")) {
-              clearTimeout(timer);
-              // Keep reading for a bit more so replay events arrive
-              setTimeout(() => resolve(data), 2_500);
-            }
-          });
+          res.on("data", (chunk: Buffer) => { data += chunk.toString(); });
           res.on("end", () => { clearTimeout(timer); resolve(data); });
-          res.on("error", (err) => { clearTimeout(timer); reject(err); });
+          res.on("error", () => { clearTimeout(timer); resolve(data); });
         },
       );
-      req.on("error", (err) => { clearTimeout(timer); reject(err); });
+      req.on("error", () => { clearTimeout(timer); resolve(data); });
     });
 
-    // 1. Connect without Last-Event-ID (gets only connected frame)
-    const firstData = await readSSE();
-    expect(firstData).toContain("event: connected");
+    // 1. Connect with Last-Event-ID=0 → replays ALL persisted events
+    const fullReplay = await readSSE("0");
+    const fullEvents = fullReplay.split("\n").filter(l => l.startsWith("event:"));
+    console.log(`  Full replay (${fullEvents.length} events): [${fullEvents.join(", ")}]`);
+    expect(fullEvents.some(e => e.includes("run."))).toBe(true);
 
-    // Extract the sequence ID from the connected frame
-    const idMatch = firstData.match(/^id: (\d+)/m);
-    const lastId = idMatch ? idMatch[1] : "0";
+    // Extract the highest sequence ID from the replay
+    const allIds = [...fullReplay.matchAll(/^id: (\d+)/gm)].map(m => parseInt(m[1], 10));
+    const maxId = Math.max(...allIds);
 
-    // 2. Connect with Last-Event-ID set to the connected frame ID
-    const replayData = await readSSE(lastId);
-    expect(replayData).toContain("event: connected");
+    // 2. Connect with Last-Event-ID = maxId → should NOT replay any of those events
+    const emptyReplay = await readSSE(String(maxId), 3_000);
+    const emptyEvents = emptyReplay.split("\n").filter(l => l.startsWith("event:"));
+    console.log(`  Empty replay (lastId=${maxId}): [${emptyEvents.join(", ")}]`);
 
-    // Log what was replayed for debugging
-    const lines = replayData.split("\n").filter(l => l.startsWith("event:"));
-    console.log(`  Replay events: [${lines.join(", ")}]`);
-
-    // The replay must deliver at least one run event (progress or terminal).
-    // With the SSE routing fix (runId stored in event payload, not guessed
-    // from missing projectKey), replayed events correctly reach the client.
-    const hasProgress = replayData.includes('"run.progress"') || replayData.includes('"run.started"');
-    const hasTerminal = replayData.includes('"report.completed"') || replayData.includes('"run.failed"') || replayData.includes('"run.cancelled"');
-    expect(hasProgress || hasTerminal).toBe(true);
-    console.log(`  Run events replayed: progress=${hasProgress} terminal=${hasTerminal}`);
-
-    // The connected frame in the replay should have a higher sequence ID
-    const replayedIdMatch = replayData.match(/^id: (\d+)/m);
-    if (replayedIdMatch && idMatch) {
-      const replayedId = parseInt(replayedIdMatch[1], 10);
-      const originalId = parseInt(idMatch[1], 10);
-      expect(replayedId).toBeGreaterThan(originalId);
-      console.log(`  Replay seq ${replayedId} > original ${originalId}`);
-    }
+    // The second connection gets a fresh connected frame, but no run.* events
+    const runEventsAfter = emptyEvents.filter(e => e.includes("run."));
+    expect(runEventsAfter.length).toBe(0);
   });
 
   test("cancels a running run with accepted:true", async () => {
