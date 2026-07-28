@@ -16,51 +16,21 @@
 import { spawn } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const UI_DIR = resolve(__dirname, "..");
 const FLOWDECK_DIR = resolve(process.env.FLOWDECK_DIR || resolve(UI_DIR, "..", "FlowDeck"));
 const KEEP = process.env.KEEP_SERVERS === "true";
+const SHELL = process.platform === "win32"; // Windows needs shell for .cmd wrappers
 
-// ── Helper: spawn a process and capture its output ──────────────────────
-function spawnProcess(cmd, args, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      ...opts,
-    });
-    const stdout = [];
-    const stderr = [];
-
-    proc.stdout.on("data", (chunk) => stdout.push(chunk));
-    proc.stderr.on("data", (chunk) => stderr.push(chunk));
-
-    proc.on("close", (code) => {
-      resolve({
-        code,
-        stdout: Buffer.concat(stdout).toString(),
-        stderr: Buffer.concat(stderr).toString(),
-      });
-    });
-    proc.on("error", reject);
-
-    // Store reference for cleanup
-    proc._label = `${cmd} ${args.join(" ")}`;
-    PROCESSES.push(proc);
-  });
-}
-
+// ── Tracked processes for cleanup ───────────────────────────────────────
 const PROCESSES = [];
 
-// ── Signal handling ──────────────────────────────────────────────────────
 function cleanup(signal) {
-  console.log(`\n[integration] ${signal} received — cleaning up...`);
+  console.log(`\n[integration] ${signal} — cleaning up...`);
   for (const proc of PROCESSES) {
     try { proc.kill("SIGTERM"); } catch {}
   }
-  // Force exit after 3s
   setTimeout(() => process.exit(1), 3000);
 }
 process.on("SIGINT", () => cleanup("SIGINT"));
@@ -68,46 +38,16 @@ process.on("SIGTERM", () => cleanup("SIGTERM"));
 
 // ── Main ────────────────────────────────────────────────────────────────
 async function main() {
-  let flowdeckPort;
-  let vitePort;
-
-  // 1. Spawn FlowDeck standalone server
+  // 1. Spawn FlowDeck standalone server (prints JSON metadata on first line)
   console.log("[integration] Starting FlowDeck standalone server...");
-  const flowdeckCwd = FLOWDECK_DIR;
-
   const flowdeckProc = spawn(
-    "bun",
-    ["run", "standalone:start"],
-    {
-      cwd: flowdeckCwd,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
+    "bun run standalone:start",
+    [],
+    { cwd: FLOWDECK_DIR, stdio: ["ignore", "pipe", "pipe"], shell: SHELL },
   );
   PROCESSES.push(flowdeckProc);
 
-  // Read the first line of stdout for metadata
-  const metadataLine = await new Promise((resolvePromise, reject) => {
-    let buffer = "";
-    const onData = (chunk) => {
-      buffer += chunk.toString();
-      const nlIndex = buffer.indexOf("\n");
-      if (nlIndex !== -1) {
-        const line = buffer.slice(0, nlIndex);
-        resolvePromise(line);
-        // Remove this listener after first line
-        flowdeckProc.stdout.removeListener("data", onData);
-      }
-    };
-    const onError = (err) => reject(err);
-    flowdeckProc.stdout.on("data", onData);
-    flowdeckProc.stderr.on("data", (chunk) => {
-      // Meta is on stdout, but log any stderr during startup
-    });
-    flowdeckProc.on("error", reject);
-    // Timeout
-    setTimeout(() => reject(new Error("FlowDeck server did not start within 15s")), 15000);
-  });
-
+  const metadataLine = await readFirstLine(flowdeckProc.stdout, 15_000);
   let flowdeckMeta;
   try {
     flowdeckMeta = JSON.parse(metadataLine);
@@ -118,21 +58,18 @@ async function main() {
   const baseUrl = flowdeckMeta.baseUrl;
   const serverKey = flowdeckMeta.serverKey;
   const projectKey = flowdeckMeta.projectKey;
-  const projectId = flowdeckMeta.projectId;
   console.log(`[integration] FlowDeck server: ${baseUrl}`);
-  console.log(`[integration]   serverKey: ${serverKey}`);
-  console.log(`[integration]   projectKey: ${projectKey}`);
-  console.log(`[integration]   projectId: ${projectId}`);
+  console.log(`[integration]   key: ${serverKey} / ${projectKey}`);
 
   // 2. Wait for health endpoint
-  console.log("[integration] Waiting for FlowDeck health endpoint...");
+  console.log("[integration] Waiting for health...");
   await waitForHealth(baseUrl, 30_000);
 
-  // 3. Start Vite dev server with FlowDeck API URL
-  console.log("[integration] Starting Vite dev server...");
+  // 3. Start Vite with FlowDeck API URL
+  console.log("[integration] Starting Vite...");
   const viteProc = spawn(
-    "npx",
-    ["vite", "--port", "0"],
+    "npx vite --port 0",
+    [],
     {
       cwd: UI_DIR,
       stdio: ["ignore", "pipe", "pipe"],
@@ -142,35 +79,21 @@ async function main() {
         VITE_HARNESS_SERVER_KEY: serverKey,
         VITE_HARNESS_PROJECT_KEY: projectKey,
       },
+      shell: SHELL,
     },
   );
   PROCESSES.push(viteProc);
 
-  // Parse Vite port from output
-  vitePort = await new Promise((resolvePromise, reject) => {
-    let buffer = "";
-    const timeout = setTimeout(() => reject(new Error("Vite did not start within 20s")), 20000);
-    const onData = (chunk) => {
-      buffer += chunk.toString();
-      // Vite prints something like: "Local:   http://localhost:5173/"
-      const match = buffer.match(/Local:\s+http:\/\/localhost:(\d+)/);
-      if (match) {
-        clearTimeout(timeout);
-        resolvePromise(parseInt(match[1], 10));
-        viteProc.stdout.removeListener("data", onData);
-        viteProc.stderr.removeListener("data", onData);
-      }
-    };
-    viteProc.stdout.on("data", onData);
-    viteProc.stderr.on("data", onData);
-    viteProc.on("error", reject);
-  });
-  console.log(`[integration] Vite dev server at http://localhost:${vitePort}`);
+  const vitePort = await parseVitePort(viteProc, 30_000);
+  console.log(`[integration] Vite at http://localhost:${vitePort}`);
 
   // 4. Run Playwright tests
   console.log("[integration] Running Playwright tests...");
-  // We override the Playwright config webServer to use our Vite instance
-  const playResult = await spawnProcess("npx", ["playwright", "test", "--config", "playwright.config.ts"], {
+  const playArgs = [
+    "npx playwright test --config playwright.integration.config.ts",
+  ];
+  // spawnProcess uses shell too
+  const playResult = await spawnProcess(playArgs[0], [], {
     cwd: UI_DIR,
     env: {
       ...process.env,
@@ -187,12 +110,80 @@ async function main() {
   }
 
   // 5. Cleanup
-  if (!KEEP) {
-    console.log("[integration] Cleaning up...");
-    cleanup("cleanup");
-  }
-
+  if (!KEEP) cleanup("cleanup");
   process.exit(playResult.code ?? 1);
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────────
+
+function readFirstLine(stream, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const timeout = setTimeout(() => reject(new Error("Timed out reading first line")), timeoutMs);
+    const onData = (chunk) => {
+      buffer += chunk.toString();
+      const nl = buffer.indexOf("\n");
+      if (nl !== -1) {
+        clearTimeout(timeout);
+        stream.removeListener("data", onData);
+        resolve(buffer.slice(0, nl).trim());
+      }
+    };
+    stream.on("data", onData);
+    stream.on("error", (err) => { clearTimeout(timeout); reject(err); });
+  });
+}
+
+function stripAnsi(str) {
+  // Remove ANSI escape sequences: ESC [ <params> m
+  return str.replace(/\x1b\[[0-9;]*m/g, "");
+}
+
+function parseVitePort(viteProc, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let buffer = "";
+    const timeout = setTimeout(() => {
+      reject(new Error(`Vite did not start within ${timeoutMs}ms. Output so far:\n${buffer}`));
+    }, timeoutMs);
+    const onData = (chunk) => {
+      buffer += chunk.toString();
+      const clean = stripAnsi(buffer);
+      // Vite prints "Local:   http://localhost:PORT/"
+      const m = clean.match(/Local:\s+http:\/\/localhost:(\d+)/);
+      if (m) {
+        clearTimeout(timeout);
+        viteProc.stdout.removeListener("data", onData);
+        viteProc.stderr.removeListener("data", onData);
+        resolve(parseInt(m[1], 10));
+      }
+    };
+    viteProc.stdout.on("data", onData);
+    viteProc.stderr.on("data", onData);
+    viteProc.on("error", (err) => { clearTimeout(timeout); reject(err); });
+  });
+}
+
+function spawnProcess(cmd, args, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(cmd, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      shell: SHELL,
+      ...opts,
+    });
+    const stdout = [];
+    const stderr = [];
+    proc.stdout.on("data", (c) => stdout.push(c));
+    proc.stderr.on("data", (c) => stderr.push(c));
+    proc.on("close", (code) => {
+      resolve({
+        code,
+        stdout: Buffer.concat(stdout).toString(),
+        stderr: Buffer.concat(stderr).toString(),
+      });
+    });
+    proc.on("error", reject);
+    PROCESSES.push(proc);
+  });
 }
 
 function waitForHealth(baseUrl, timeoutMs) {
