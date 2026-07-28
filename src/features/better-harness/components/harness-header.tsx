@@ -6,7 +6,6 @@ import {
   Sparkles,
   RefreshCw,
   ExternalLink,
-  ShieldAlert,
   Server,
   FolderGit2,
   Clock,
@@ -17,7 +16,8 @@ import {
 export function HarnessHeader() {
   const {
     serverKey,
-    projectDir,
+    projectKey,
+    displayProjectPath,
     report,
     availability,
     isLoading,
@@ -96,8 +96,8 @@ export function HarnessHeader() {
             <span className="hidden sm:inline text-slate-600">•</span>
             <div className="inline-flex items-center gap-1 min-w-0 font-mono text-[11px] text-slate-300 max-w-full">
               <FolderGit2 className="w-3 h-3 text-slate-400 shrink-0" />
-              <span className="truncate block min-w-0" title={projectDir || report?.project.directory || "Current Project"}>
-                {projectDir || report?.project.directory || "Current Project"}
+              <span className="truncate block min-w-0" title={displayProjectPath || report?.project.directory || projectKey || "Current Project"}>
+                {displayProjectPath || report?.project.directory || projectKey || "Current Project"}
               </span>
             </div>
           </div>

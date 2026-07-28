@@ -1,5 +1,5 @@
 import React from "react";
-import { CheckCircle2, Sparkles, RefreshCw } from "lucide-react";
+import { CheckCircle2, RefreshCw } from "lucide-react";
 import { useHarness } from "../context/harness-context";
 
 export function HarnessEmptyState() {

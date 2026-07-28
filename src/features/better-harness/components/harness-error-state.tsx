@@ -1,6 +1,6 @@
 import React from "react";
 import { useHarness } from "../context/harness-context";
-import { AlertOctagon, RefreshCw, AlertTriangle } from "lucide-react";
+import { AlertOctagon, RefreshCw } from "lucide-react";
 
 export function HarnessErrorState() {
   const { isUnsupportedSchema, errorMessage, refreshReport, isLoading } = useHarness();

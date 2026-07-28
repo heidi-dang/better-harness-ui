@@ -37,7 +37,7 @@ export function HarnessTabs() {
   ];
 
   const handleKeyDown = (e: React.KeyboardEvent, index: number) => {
-    let newIndex = index;
+    let newIndex: number;
     if (e.key === "ArrowRight") {
       newIndex = (index + 1) % tabs.length;
     } else if (e.key === "ArrowLeft") {

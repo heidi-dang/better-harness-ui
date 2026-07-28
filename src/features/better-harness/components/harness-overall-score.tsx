@@ -1,7 +1,7 @@
 import React from "react";
 import { useHarness } from "../context/harness-context";
 import { getScoreColorClass, getScreenReaderScoreLabel } from "../utils/score-format";
-import { TrendingUp, Activity, AlertTriangle, ShieldCheck, CheckCircle2 } from "lucide-react";
+import { TrendingUp, Activity, AlertTriangle, ShieldCheck } from "lucide-react";
 
 export function HarnessOverallScore() {
   const { report } = useHarness();

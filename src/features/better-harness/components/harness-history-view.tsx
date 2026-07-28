@@ -1,22 +1,17 @@
 import React, { useState, useEffect } from "react";
 import { useHarness } from "../context/harness-context";
-import { HISTORICAL_HARNESS_REPORTS } from "../fixtures/harness-fixtures";
 import { HarnessReport } from "../types";
 import { getScoreColorClass } from "../utils/score-format";
 import { Calendar, TrendingUp, CheckCircle2, FileText, Sparkles, Activity } from "lucide-react";
 
 export function HarnessHistoryView() {
   const { dataSource } = useHarness();
-  const [historyRuns, setHistoryRuns] = useState<HarnessReport[]>(HISTORICAL_HARNESS_REPORTS);
+  const [historyRuns, setHistoryRuns] = useState<HarnessReport[]>([]);
 
   useEffect(() => {
-    if (dataSource.getHistory) {
-      dataSource.getHistory().then((runs) => {
-        if (runs && runs.length > 0) {
-          setHistoryRuns(runs);
-        }
-      });
-    }
+    dataSource.getHistory().then((runs) => {
+      setHistoryRuns(runs || []);
+    });
   }, [dataSource]);
 
   // Sort runs chronologically (oldest to newest) for chart plotting
@@ -209,7 +204,7 @@ export function HarnessHistoryView() {
             {points.map((pt) => {
               const isHovered = hoveredRunIndex === pt.index;
               const isSelected = selectedRunIndex === pt.index;
-              const colors = getScoreColorClass(pt.run.overallScore);
+              getScoreColorClass(pt.run.overallScore);
 
               return (
                 <g

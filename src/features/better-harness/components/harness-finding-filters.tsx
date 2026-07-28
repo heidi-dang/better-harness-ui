@@ -7,8 +7,7 @@ import {
   HarnessFixVehicle,
   HarnessFindingFilterState,
 } from "../types";
-import { formatDimensionName, getVehicleLabel } from "../utils/score-format";
-import { Search, Filter, X, ArrowUpDown } from "lucide-react";
+import { Search, X, ArrowUpDown } from "lucide-react";
 
 export function HarnessFindingFilters() {
   const { filters, setFilters, clearFilters, filteredFindings, report } = useHarness();

@@ -1,5 +1,5 @@
 import React from "react";
-import { PlugZap, ArrowRight, ShieldAlert, Sparkles, SlidersHorizontal } from "lucide-react";
+import { PlugZap, ShieldAlert, Sparkles, SlidersHorizontal } from "lucide-react";
 import { useHarness } from "../context/harness-context";
 
 export function HarnessUnavailableState() {
