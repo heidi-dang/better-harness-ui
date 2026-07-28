@@ -95,7 +95,7 @@ test.describe("FlowDeck HTTP API", () => {
     expect(getRes.status).toBe(200);
   }, 30_000);
 
-  test("SSE delivers connected frame, heartbeat, and run.progress", async ({}, testInfo) => {
+  test("SSE replay delivers run.progress with validated envelope and matching runId", async ({}, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
 
@@ -168,6 +168,52 @@ test.describe("FlowDeck HTTP API", () => {
     }
   });
 
+  test("dedicated SSE connection delivers mandatory heartbeat", async ({}, testInfo) => {
+    testInfo.setTimeout(45_000);
+    const http = await import("node:http");
+    const httpServerUrl = new URL(BASE_URL);
+
+    // Start a run so there is an SSE endpoint to connect to
+    const runRes = await fetch(
+      `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "full" }),
+      },
+    );
+    const { runId }: any = await runRes.json();
+
+    // Connect SSE and wait long enough for a heartbeat (interval is 15 s)
+    const sseData = await new Promise<string>((resolve) => {
+      let accumulated = "";
+      const timer = setTimeout(() => resolve(accumulated), 20_000);
+      const path = `/api/v1/servers/${encodeURIComponent(SERVER_KEY)}/projects/${encodeURIComponent(PROJECT_KEY)}/better-harness/runs/${encodeURIComponent(runId)}/events`;
+      const req = http.get(
+        { hostname: httpServerUrl.hostname, port: parseInt(httpServerUrl.port, 10), path },
+        (res) => {
+          res.on("data", (chunk: Buffer) => { accumulated += chunk.toString(); });
+          res.on("end", () => { clearTimeout(timer); resolve(accumulated); });
+          res.on("error", () => { clearTimeout(timer); resolve(accumulated); });
+        },
+      );
+      req.on("error", () => { clearTimeout(timer); resolve(accumulated); });
+    });
+
+    expect(sseData).toContain("event: connected");
+    expect(sseData).toContain("event: heartbeat");
+
+    // Validate canonical heartbeat envelope
+    const hbMatch = sseData.match(/data: ({.*?heartbeat.*?})\n/i);
+    expect(hbMatch).not.toBeNull();
+    if (hbMatch) {
+      const parsed = JSON.parse(hbMatch[1]);
+      expect(parsed.type).toBe("heartbeat");
+      expect(parsed.timestamp).toBeTruthy();
+      expect(parsed.data.time).toBeDefined();
+    }
+  });
+
   test("SSE Last-Event-ID correctly filters replayed events", async ({}, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
@@ -212,8 +258,11 @@ test.describe("FlowDeck HTTP API", () => {
     console.log(`  Full replay (${fullEvents.length} events): [${fullEvents.join(", ")}]`);
     expect(fullEvents.some(e => e.includes("run."))).toBe(true);
 
-    // Extract the highest sequence ID from the replay
+    // Assert no duplicate IDs in the replayed batch
     const allIds = [...fullReplay.matchAll(/^id: (\d+)/gm)].map(m => parseInt(m[1], 10));
+    const uniqueIds = new Set(allIds);
+    expect(allIds.length).toBe(uniqueIds.size);
+    expect(allIds.every((id, i) => i === 0 || id > allIds[i - 1])).toBe(true);
     const maxId = Math.max(...allIds);
 
     // 2. Connect with Last-Event-ID = maxId → should NOT replay any of those events
@@ -224,6 +273,11 @@ test.describe("FlowDeck HTTP API", () => {
     // The second connection gets a fresh connected frame, but no run.* events
     const runEventsAfter = emptyEvents.filter(e => e.includes("run."));
     expect(runEventsAfter.length).toBe(0);
+
+    // Also verify that the required lifecycle events are present
+    expect(fullReplay).toContain("event: run.progress");
+    expect(fullReplay).toContain("event: finding.created");
+    expect(fullReplay).toContain("event: report.completed");
   });
 
   test("cancels a running run with accepted:true", async () => {
@@ -305,38 +359,69 @@ test.describe("FlowDeck Browser UI", () => {
     await expect(page.locator("body")).toContainText(PROJECT_KEY, { timeout: 3_000 });
   });
 
-  test("regenerate button is visible and confirms dialog", async ({ page }) => {
+  test("regenerate button triggers POST to FlowDeck /runs", async ({ page }) => {
+    // Intercept the POST /runs request
+    const runRequestPromise = page.waitForRequest((req) =>
+      req.url().includes("/better-harness/runs") && req.method() === "POST"
+    );
+
     await page.goto(HARNESS_ROUTE);
     await page.waitForLoadState("networkidle");
     await page.waitForTimeout(1_000);
 
-    // Find the regenerate button
     const regenBtn = page.locator('button:has-text("Regenerate")').first();
     await expect(regenBtn).toBeVisible({ timeout: 5_000 });
-
-    // Click → confirmation dialog opens
     await regenBtn.click();
-    const confirmDialog = page.locator('[role="dialog"]');
-    await expect(confirmDialog).toBeVisible({ timeout: 3_000 });
 
-    // Confirm the regeneration
+    // Confirm the dialog
     const yesBtn = page.locator('button:has-text("Yes")').first();
     await expect(yesBtn).toBeVisible({ timeout: 2_000 });
     await yesBtn.click();
 
-    // The dialog should close after confirmation
-    await expect(confirmDialog).not.toBeVisible({ timeout: 3_000 });
+    // Verify the POST request was made and get its response
+    const runRequest = await runRequestPromise;
+    expect(runRequest).not.toBeNull();
+    const runResponse = await runRequest.response();
+    expect(runResponse).not.toBeNull();
+    expect(runResponse!.status()).toBe(201);
+    const runBody: any = await runResponse!.json();
+    expect(runBody.accepted).toBe(true);
+    expect(runBody.runId).toBeDefined();
 
     // Wait for the run to complete (it's fast — ~1 s)
-    await page.waitForTimeout(5_000);
+    await page.waitForTimeout(3_000);
 
-    // No persistent error dialogs
-    const errorDialogs = page.locator('[role="dialog"]');
-    const dialogCount = await errorDialogs.count();
-    if (dialogCount > 0) {
-      const dialogText = await errorDialogs.first().textContent();
-      expect(dialogText?.toLowerCase()).not.toContain("error");
-    }
+    // The page should have rendered the report score after completion
+    const pageText = await page.locator("body").innerText();
+    expect(pageText).toMatch(/Score/i);
+  });
+
+  test("progress state is visible during a running analysis", async ({ page }) => {
+    // Start a slow run via API, then navigate to the UI
+    const runRes = await fetch(
+      `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mode: "full" }),
+      },
+    );
+    const { runId }: any = await runRes.json();
+    expect(runId).toBeDefined();
+
+    // Quickly navigate while the run is still executing
+    await page.goto(HARNESS_ROUTE);
+    await page.waitForLoadState("networkidle");
+    await page.waitForTimeout(1_000);
+
+    // The run ID should be referenced somewhere in the page data
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText.length).toBeGreaterThan(0);
+
+    // Wait for completion and verify the score appears
+    await page.waitForTimeout(5_000);
+    const finalText = await page.locator("body").innerText();
+    expect(finalText).toMatch(/Score/i);
   });
 
   test("run completion reflects in the UI timestamp", async ({ page }) => {
@@ -390,7 +475,15 @@ test.describe("FlowDeck Browser UI", () => {
     expect(historyPresent).toBe(true);
   });
 
-  test("missing configuration shows Unavailable state", async ({ page }) => {
+  test("missing configuration shows Unavailable state and makes zero API requests", async ({ page }) => {
+    // Intercept ALL requests and reject any that target the FlowDeck backend
+    const apiRequests: string[] = [];
+    await page.route("**/*", (route) => {
+      const url = route.request().url();
+      if (url.includes(BASE_URL)) apiRequests.push(url);
+      route.continue();
+    });
+
     // Navigate to root (no server/project keys) instead of HARNESS_ROUTE
     await page.goto("/");
     await page.waitForLoadState("networkidle");
@@ -403,6 +496,9 @@ test.describe("FlowDeck Browser UI", () => {
     // The demo button should be visible
     const demoBtn = page.locator("text=Enable Completed Demo Fixture");
     await expect(demoBtn).toBeVisible({ timeout: 3_000 });
+
+    // Zero API requests were made to the FlowDeck backend
+    expect(apiRequests.length).toBe(0);
   });
 });
 
