@@ -95,7 +95,8 @@ test.describe("FlowDeck HTTP API", () => {
     expect(getRes.status).toBe(200);
   }, 30_000);
 
-  test("SSE delivers connected frame and heartbeat", async () => {
+  test("SSE delivers connected frame and heartbeat", async ({}, testInfo) => {
+    testInfo.setTimeout(45_000);
     // Start a run
     const runRes = await fetch(
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs`,
@@ -172,9 +173,10 @@ test.describe("FlowDeck HTTP API", () => {
 
     expect(connected).toBe(true);
     expect(heartbeat).toBe(true);
-  }, 45_000);
+  });
 
-  test("SSE Last-Event-ID replay delivers missed events", async () => {
+  test("SSE Last-Event-ID replay delivers missed events", async ({}, testInfo) => {
+    testInfo.setTimeout(45_000);
     // Start a run
     const runRes = await fetch(
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs`,
@@ -242,7 +244,7 @@ test.describe("FlowDeck HTTP API", () => {
     // Verify that at least the replay delivered SOMETHING beyond the initial frame
     // (heartbeats are always sent, so this should pass even without run events)
     expect(replayData.length).toBeGreaterThan(firstConnected.length);
-  }, 45_000);
+  });
 
   test("cancels a running run with accepted:true", async () => {
     const runRes = await fetch(
