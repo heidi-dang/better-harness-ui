@@ -3,6 +3,17 @@ import { HarnessReport } from "../types";
 import { HarnessReportSchema } from "./harness-report";
 import { HarnessRunProgressSchema } from "./harness-run";
 
+/**
+ * Canonical FlowDeck SSE Event Contract.
+ * Aligned with backend SSE_CONTRACT_VERSION "1.0.0".
+ *
+ * Every named SSE event uses the canonical wire envelope:
+ *
+ *   id: <decimal-sequence-id>
+ *   event: <named-event-type>
+ *   data: {"type":"<named-event-type>","timestamp":"<ISO-8601>","data":<event-specific-payload>}
+ */
+
 // ── Discriminated HTTP result for empty-state semantics ───────────────
 
 export type ValidatedHttpResult<T> =
@@ -83,10 +94,8 @@ export const VerifyResponseSchema = z
 
 export type VerifyResponse = z.infer<typeof VerifyResponseSchema>;
 
-// ── FlowDeck Cancel Response (exact contract) ─────────────────────────
-// FlowDeck returns: { accepted: boolean, error?: string }
-// No null/undefined accepted. accepted:false is explicitly a failure.
-
+// FlowDeck CancelRunResponseSchema: { accepted: boolean, error?: string }
+// UI validates with accepted: literal(true) for success confirmation.
 export const CancelResponseSchema = z
   .object({
     accepted: z.literal(true),
@@ -96,16 +105,7 @@ export const CancelResponseSchema = z
 
 export type CancelResponse = z.infer<typeof CancelResponseSchema>;
 
-// ── FlowDeck SSE Schemas ──────────────────────────────────────────────
-// FlowDeck SSE wire format:
-//   id: <seq>
-//   event: <named-event-type>
-//   data: {"type":"<named-event-type>","timestamp":"<iso8601>","data":<payload>}
-//
-// The data: line contains a JSON envelope with:
-//   - type: must match the named SSE event
-//   - timestamp: ISO 8601
-//   - data: event-specific payload
+// ── SSE Event Contract ─────────────────────────────────────────────────
 
 export const SSESupportedEventEnum = z.enum([
   "connected",
@@ -124,52 +124,18 @@ export const SSESupportedEventEnum = z.enum([
 
 export type SSESupportedEvent = z.infer<typeof SSESupportedEventEnum>;
 
-/** The JSON envelope inside the SSE data: line. */
+/** Canonical envelope inside the SSE data: line. */
 export const SSEEnvelopeSchema = z
   .object({
     type: SSESupportedEventEnum,
-    timestamp: z.string().min(1),
+    timestamp: z.string().datetime({ message: "timestamp must be ISO-8601" }),
     data: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 
 export type SSEEnvelope = z.infer<typeof SSEEnvelopeSchema>;
 
-// ── Event-specific payload schemas ────────────────────────────────────
-
-export const SSERunProgressPayloadSchema = z
-  .object({
-    runId: z.string().min(1),
-    status: z.enum(["queued", "running", "completed", "failed", "cancelled"]),
-    stage: z.string().optional(),
-    progressPercent: z.number().min(0).max(100).optional(),
-    startedAt: z.string().optional(),
-    updatedAt: z.string().optional(),
-    estimatedTimeRemainingSeconds: z.number().nonnegative().optional(),
-    errorMessage: z.string().optional(),
-  })
-  .strict();
-
-export type SSERunProgressPayload = z.infer<typeof SSERunProgressPayloadSchema>;
-
-export const SSEReportCompletedPayloadSchema = z
-  .object({
-    runId: z.string().min(1),
-  })
-  .strict();
-
-export const SSERunFailedPayloadSchema = z
-  .object({
-    runId: z.string().min(1),
-    errorMessage: z.string().optional(),
-  })
-  .strict();
-
-export const SSERunCancelledPayloadSchema = z
-  .object({
-    runId: z.string().min(1),
-  })
-  .strict();
+// ── Event-specific payload schemas (aligned with FlowDeck backend) ────
 
 export const SSEConnectedPayloadSchema = z
   .object({
@@ -186,27 +152,31 @@ export const SSEHeartbeatPayloadSchema = z
 export const SSERunQueuedPayloadSchema = z
   .object({
     runId: z.string().min(1),
+    status: z.literal("queued").optional(),
+    stage: z.string().optional(),
+    progressPercent: z.number().min(0).max(100).optional(),
   })
   .strict();
 
 export const SSERunStartedPayloadSchema = z
   .object({
     runId: z.string().min(1),
+    status: z.literal("running").optional(),
+    stage: z.string().optional(),
+    progressPercent: z.number().min(0).max(100).optional(),
   })
   .strict();
 
 export const SSECollectorStartedPayloadSchema = z
   .object({
     runId: z.string().min(1),
-    collector: z.string().min(1),
   })
   .strict();
 
 export const SSECollectorCompletedPayloadSchema = z
   .object({
     runId: z.string().min(1),
-    collector: z.string().min(1),
-    findingsCount: z.number().int().nonnegative().optional(),
+    evidenceCount: z.number().int().nonnegative(),
   })
   .strict();
 
@@ -219,9 +189,38 @@ export const SSEAnalysisStartedPayloadSchema = z
 export const SSEFindingCreatedPayloadSchema = z
   .object({
     runId: z.string().min(1),
-    findingId: z.string().min(1),
-    dimension: z.string().min(1),
-    priority: z.string().min(1),
+    findingCount: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const SSERunProgressPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    status: z.enum(["queued", "running", "completed", "failed", "cancelled"]),
+    stage: z.string(),
+    progressPercent: z.number().min(0).max(100),
+    updatedAt: z.string(),
+    errorMessage: z.string().optional(),
+  })
+  .strict();
+
+export const SSEReportCompletedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+  })
+  .strict();
+
+export const SSERunCancelledPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    errorMessage: z.string().optional(),
+  })
+  .strict();
+
+export const SSERunFailedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    errorMessage: z.string(),
   })
   .strict();
 
@@ -268,9 +267,6 @@ export interface ValidatedSSEFrame {
   payload: unknown;
 }
 
-/**
- * Validated SSE frame from an incremental parser.
- */
 export interface SSEFrame {
   id?: string;
   event: string;
@@ -354,7 +350,5 @@ export function validateRunProgressResponse(
 export function validateCancelResponse(
   data: unknown,
 ): ValidationResult<CancelResponse> {
-  // FlowDeck CancelRunResponseSchema: { accepted: z.boolean(), error?: string }
-  // The UI requires accepted: true for success.
   return validateWith(CancelResponseSchema, "CancelResponse", data);
 }

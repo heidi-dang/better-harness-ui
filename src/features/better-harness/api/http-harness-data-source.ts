@@ -5,6 +5,7 @@ import {
   BatchVerifyResult,
 } from "./harness-data-source";
 import { HarnessReport, HarnessRunProgress } from "../types";
+import type { SSESupportedEvent } from "../schemas/harness-api";
 import {
   validateAvailabilityResponse,
   validateStartRunResponse,
@@ -17,6 +18,7 @@ import {
   validateRunProgressResponse,
   SSEEnvelopeSchema,
   getPayloadValidator,
+  type ValidatedHttpResult,
   type SSEEnvelope,
 } from "../schemas/harness-api";
 
@@ -50,7 +52,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   private sseAbortController: AbortController | null = null;
   /** Flag to prevent multiple concurrent auth refresh calls */
   private authRefreshInFlight: Promise<string | undefined> | null = null;
-
   /** Latest validated SSE event ID for replay (per active run) */
   private lastValidEventId: string | undefined;
 
@@ -78,11 +79,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
 
   /**
    * Generic fetch + Zod validation with explicit empty-state results.
-   *
-   * - 204 / 404 → ValidatedHttpResult.kind = "empty"
-   * - 401/403 with onAuthFailure → coalesces concurrent refreshes, retries ONCE
-   * - Other non-ok → throws Error
-   * - OK → validates JSON, returns ValidatedHttpResult.kind = "value"
    */
   private async validatedRequest<T>(
     method: string,
@@ -100,11 +96,10 @@ export class HttpHarnessDataSource implements HarnessDataSource {
       signal,
     });
 
-    // 204/404 → explicit empty, not undefined as T
     if (res.status === 204) return { kind: "empty", status: 204 };
     if (res.status === 404) return { kind: "empty", status: 404 };
 
-    // 401/403 → attempt auth refresh once
+    // 401/403 — attempt auth refresh once
     if ((res.status === 401 || res.status === 403) && this.onAuthFailure && !isRetry) {
       const newToken = await this.refreshAuth();
       if (newToken) {
@@ -134,8 +129,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
 
   /**
    * Coalesce concurrent auth refresh calls into a single in-flight promise.
-   * This prevents multiple callers from each triggering `onAuthFailure`
-   * when they all receive 401 from the same expired token.
    */
   private async refreshAuth(): Promise<string | undefined> {
     if (!this.onAuthFailure) return undefined;
@@ -191,7 +184,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async getRunProgress(runId?: string): Promise<HarnessRunProgress | undefined> {
-    // Use exact run endpoint when runId is known; fall back to /runs/current for recovery
     const path = runId
       ? `/runs/${encodeURIComponent(runId)}`
       : "/runs/current";
@@ -392,7 +384,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   async cancel(): Promise<void> {
-    // Cancel via the current run ID — exact run, validated response
     if (!this.currentRunId) return;
 
     const result = await this.validatedRequest(
@@ -402,29 +393,21 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     );
 
     if (result.kind === "empty") {
-      // FlowDeck contract: cancel returns { accepted: boolean } — empty is failure
       throw new Error("Cancel response is empty (204/404) — cancellation not confirmed");
     }
 
-    // validateCancelResponse already requires accepted: true
-    // FlowDeck CancelRunResponseSchema: { accepted: boolean, error?: string }
-    // We validated with accepted: literal(true)
-
-    // Cancel any in-flight regeneration
     if (this.runAbortController) {
       this.runAbortController.abort();
       this.runAbortController = null;
     }
 
-    // Cancel fetch-based SSE reader
     this.cancelSSE();
 
-    // Clear run ID only after confirmed cancellation
     this.currentRunId = undefined;
     this.lastValidEventId = undefined;
   }
 
-  // ── Fetch-based SSE (supports Authorization headers) ────────────────
+  // ── SSE Stream ──────────────────────────────────────────────────
 
   private cancelSSE(): void {
     if (this.sseAbortController) {
@@ -435,6 +418,8 @@ export class HttpHarnessDataSource implements HarnessDataSource {
 
   /**
    * Incremental SSE parser state.
+   * Reset on new stream connection to clear partial frames but preserve
+   * the last successfully processed event ID for replay.
    */
   private sseParserState: {
     buffer: string;
@@ -443,9 +428,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     currentId: string | undefined;
   } | null = null;
 
-  /**
-   * Reset the SSE parser state for a new stream.
-   */
   private resetSSEParser(): void {
     this.sseParserState = {
       buffer: "",
@@ -456,14 +438,7 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   }
 
   /**
-   * Parse an SSE frame line by line according to the SSE specification:
-   *   - Lines beginning with ":" are comments (ignored)
-   *   - "event:" sets the event type
-   *   - "data:" appends to the data buffer
-   *   - "id:" sets the event ID
-   *   - Empty line dispatches the event
-   *
-   * Multiple data lines are joined with "\n".
+   * Parse an SSE frame line by line according to the SSE specification.
    */
   private parseSSEChunk(
     chunk: string,
@@ -474,7 +449,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     // Normalize CRLF to LF (SSE spec allows both)
     this.sseParserState.buffer += chunk.replace(/\r\n/g, "\n");
 
-    // Split on newlines, handling LF boundaries
     let lineStart = 0;
     const buf = this.sseParserState.buffer;
 
@@ -503,7 +477,6 @@ export class HttpHarnessDataSource implements HarnessDataSource {
         this.sseParserState.currentEventType = line.slice(6).trim();
       } else if (line.startsWith("data:")) {
         const dataValue = line.slice(5);
-        // Leading space is stripped by convention
         this.sseParserState.currentData.push(dataValue.startsWith(" ") ? dataValue.slice(1) : dataValue);
       } else if (line.startsWith("id:")) {
         this.sseParserState.currentId = line.slice(3).trim() || undefined;
@@ -518,22 +491,17 @@ export class HttpHarnessDataSource implements HarnessDataSource {
   /**
    * Validate an SSE frame's data line as a FlowDeck envelope, then
    * extract the inner payload for the consumer.
-   *
-   * Returns null if the frame should be discarded (malformed, wrong run, etc.)
    */
   private validateSSEFrame(
     frame: { id?: string; event: string; data: string[] },
     expectedRunId?: string,
   ): { eventId: string | undefined; type: SSESupportedEvent; payload: unknown } | null {
-    // Join multiple data lines with newline
     const rawData = frame.data.join("\n");
 
-    // Parse JSON from the data field
     let parsed: unknown;
     try {
       parsed = JSON.parse(rawData);
     } catch {
-      // Malformed JSON: no state update
       return null;
     }
 
@@ -570,11 +538,151 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     };
   }
 
+  // ── Shared stream reader ─────────────────────────────────────────
+
+  /**
+   * Single shared stream-reading loop. Handles:
+   * - Auth retry (exactly one)
+   * - Event ID deduplication
+   * - Parser state management
+   * - Error propagation
+   * - Decoder flush
+   *
+   * Returns true if the caller should continue polling, false if the
+   * stream should be the sole event source (only for the first
+   * successful connection).
+   */
+  private async readStreamLoop(
+    startArgs: {
+      runId: string;
+      onEvent: (event: { type: string; data: unknown }) => void;
+      onError?: (error: Event) => void;
+    },
+    attempt: number,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (signal?.aborted) return false;
+
+    const { runId, onEvent, onError } = startArgs;
+    const url = `${this.apiBase}/runs/${encodeURIComponent(runId)}/events`;
+
+    try {
+      const headers: Record<string, string> = {
+        ...this.getHeaders(),
+        Accept: "text/event-stream",
+      };
+      // Last-Event-ID is optional — only send if we have one
+      if (this.lastValidEventId) {
+        headers["Last-Event-ID"] = this.lastValidEventId;
+      }
+
+      const response = await fetch(url, { headers, signal });
+
+      // On 401/403: attempt auth refresh exactly once
+      if ((response.status === 401 || response.status === 403) && attempt === 1 && this.onAuthFailure) {
+        const newToken = await this.refreshAuth();
+        if (newToken) {
+          this.authToken = newToken;
+          // Retry once — preserve current replay state
+          return this.readStreamLoop(startArgs, 2, signal);
+        }
+        // Refresh failed — fall through to onError
+        if (onError) onError(new Event("error"));
+        return false;
+      }
+
+      // Second 401/403: do not retry
+      if (response.status === 401 || response.status === 403) {
+        if (onError) onError(new Event("error"));
+        return false;
+      }
+
+      if (!response.ok) {
+        throw new Error(`SSE connection failed: ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("SSE response body is not readable");
+      }
+
+      const decoder = new TextDecoder();
+
+      // Reset parser state when successfully connecting (clear partial frames)
+      this.resetSSEParser();
+
+      while (!signal?.aborted) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const text = decoder.decode(value, { stream: true });
+        this.parseSSEChunk(text, (rawFrame) => {
+          const validated = this.validateSSEFrame(rawFrame, runId);
+          if (!validated) return;
+
+          // Event ID deduplication
+          if (validated.eventId) {
+            const idNum = parseInt(validated.eventId, 10);
+            const lastNum = this.lastValidEventId ? parseInt(this.lastValidEventId, 10) : -1;
+            if (!isNaN(idNum) && idNum <= lastNum) {
+              return;
+            }
+            this.lastValidEventId = validated.eventId;
+          }
+
+          // Map FlowDeck envelope to consumer event
+          if (validated.type === "run.progress") {
+            onEvent({ type: "run.progress", data: validated.payload });
+          } else if (
+            validated.type === "report.completed" ||
+            validated.type === "run.failed" ||
+            validated.type === "run.cancelled"
+          ) {
+            onEvent({ type: validated.type, data: validated.payload });
+          }
+        });
+      }
+
+      // Finalize decoder — pass remaining bytes back into parser
+      const flushText = decoder.decode();
+      if (flushText) {
+        this.parseSSEChunk(flushText, () => {}); // discard any incomplete frame
+      }
+
+      return attempt === 1; // first successful connection → no polling needed
+    } catch (err) {
+      if (signal?.aborted) return false;
+
+      // Attempt auth refresh for 401/403 — detect by string since fetch throws for HTTP errors
+      if (
+        attempt === 1 &&
+        (err as Error).message?.includes("401") ||
+        (err as Error).message?.includes("403")
+      ) {
+        if (this.onAuthFailure) {
+          try {
+            const newToken = await this.refreshAuth();
+            if (newToken) {
+              this.authToken = newToken;
+              const retryResult = await this.readStreamLoop(startArgs, 2, signal);
+              if (retryResult) return true;
+            }
+          } catch { /* refresh failed — fallback to polling */ }
+        }
+      }
+
+      // Stream failed — signal polling fallback
+      if (onError) onError(new Event("error"));
+      return false;
+    }
+  }
+
   /**
    * Subscribe to SSE progress events using fetch() so we can pass
    * Authorization headers that native EventSource cannot set.
    *
-   * Returns an unsubscribe function.
+   * Uses a single shared readStreamLoop for all stream phases
+   * (initial connect, auth retry).
    */
   subscribeToProgress(
     runId: string,
@@ -589,99 +697,8 @@ export class HttpHarnessDataSource implements HarnessDataSource {
     this.sseAbortController = abortController;
     const signal = abortController.signal;
 
-    const url = `${this.apiBase}/runs/${encodeURIComponent(runId)}/events`;
-
-    const startStream = async () => {
-      try {
-        // Build headers with optional Last-Event-ID for replay
-        const headers: Record<string, string> = {
-          ...this.getHeaders(),
-          Accept: "text/event-stream",
-        };
-        if (this.lastValidEventId) {
-          headers["Last-Event-ID"] = this.lastValidEventId;
-        }
-
-        const response = await fetch(url, { headers, signal });
-
-        if (!response.ok) {
-          throw new Error(`SSE connection failed: ${response.status}`);
-        }
-
-        const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error("SSE response body is not readable");
-        }
-
-        const decoder = new TextDecoder();
-
-        while (!signal.aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const text = decoder.decode(value, { stream: true });
-          this.parseSSEChunk(text, (rawFrame) => {
-            const validated = this.validateSSEFrame(rawFrame, runId);
-            if (!validated) return;
-
-            // Event ID deduplication
-            if (validated.eventId) {
-              const idNum = parseInt(validated.eventId, 10);
-              const lastNum = this.lastValidEventId ? parseInt(this.lastValidEventId, 10) : -1;
-              if (!isNaN(idNum) && idNum <= lastNum) {
-                // Duplicate or older event ID — ignore
-                return;
-              }
-              this.lastValidEventId = validated.eventId;
-            }
-
-            // Map FlowDeck envelope to consumer event
-            if (validated.type === "run.progress") {
-              onEvent({ type: "run.progress", data: validated.payload });
-            } else if (
-              validated.type === "report.completed" ||
-              validated.type === "run.failed" ||
-              validated.type === "run.cancelled"
-            ) {
-              onEvent({ type: validated.type, data: validated.payload });
-            }
-            // Other event types (heartbeat, connected, etc.) are silently consumed
-          });
-        }
-
-        // Finalize decoder
-        decoder.decode(); // flush
-      } catch (err) {
-        if (signal.aborted) return; // Intentional cancellation, not an error
-
-        // Attempt auth refresh for 401/403
-        if (
-          (err as Error).message?.includes("401") ||
-          (err as Error).message?.includes("403")
-        ) {
-          if (this.onAuthFailure && this.lastValidEventId) {
-            try {
-              const newToken = await this.refreshAuth();
-              if (newToken) {
-                this.authToken = newToken;
-                // Retry once — preserve current replay state
-                const retryResult = await this.retrySSE(runId, onEvent, onError, abortController.signal);
-                if (retryResult) return;
-              }
-            } catch {
-              // Refresh failed — fall through to onError
-            }
-          }
-        }
-
-        // Fall back to polling — no more retries for auth failures
-        if (onError) {
-          onError(new Event("error"));
-        }
-      }
-    };
-
-    startStream();
+    // Start the first attempt
+    this.readStreamLoop({ runId, onEvent, onError }, 1, signal);
 
     return () => {
       abortController.abort();
@@ -689,93 +706,5 @@ export class HttpHarnessDataSource implements HarnessDataSource {
         this.sseAbortController = null;
       }
     };
-  }
-
-  /**
-   * Retry SSE stream with refreshed token. Returns true if retry succeeded
-   * (stream connected), false if it should fall back to polling.
-   */
-  private async retrySSE(
-    runId: string,
-    onEvent: (event: { type: string; data: unknown }) => void,
-    onError?: (error: Event) => void,
-    outerSignal?: AbortSignal,
-  ): Promise<boolean> {
-    if (outerSignal?.aborted) return false;
-
-    try {
-      const headers: Record<string, string> = {
-        ...this.getHeaders(),
-        Accept: "text/event-stream",
-      };
-      if (this.lastValidEventId) {
-        headers["Last-Event-ID"] = this.lastValidEventId;
-      }
-
-      const response = await fetch(
-        `${this.apiBase}/runs/${encodeURIComponent(runId)}/events`,
-        { headers, signal: outerSignal },
-      );
-
-      if (!response.ok) return false;
-
-      const reader = response.body?.getReader();
-      if (!reader) return false;
-
-      // Stream reconnected — continue reading in a new fire-and-forget loop
-      // (the original startStream has already returned on error)
-      const decoder = new TextDecoder();
-      this.readStream(reader, decoder, runId, onEvent, outerSignal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
-   * Continuously read from an SSE stream, dispatching validated events.
-   */
-  private readStream(
-    reader: ReadableStreamDefaultReader<Uint8Array>,
-    decoder: TextDecoder,
-    runId: string,
-    onEvent: (event: { type: string; data: unknown }) => void,
-    signal?: AbortSignal,
-  ): void {
-    const readLoop = async () => {
-      try {
-        while (!signal?.aborted) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          const text = decoder.decode(value, { stream: true });
-          this.parseSSEChunk(text, (rawFrame) => {
-            const validated = this.validateSSEFrame(rawFrame, runId);
-            if (!validated) return;
-
-            if (validated.eventId) {
-              const idNum = parseInt(validated.eventId, 10);
-              const lastNum = this.lastValidEventId ? parseInt(this.lastValidEventId, 10) : -1;
-              if (!isNaN(idNum) && idNum <= lastNum) return;
-              this.lastValidEventId = validated.eventId;
-            }
-
-            if (validated.type === "run.progress") {
-              onEvent({ type: "run.progress", data: validated.payload });
-            } else if (
-              validated.type === "report.completed" ||
-              validated.type === "run.failed" ||
-              validated.type === "run.cancelled"
-            ) {
-              onEvent({ type: validated.type, data: validated.payload });
-            }
-          });
-        }
-        decoder.decode(); // flush
-      } catch {
-        if (signal?.aborted) return;
-      }
-    };
-    readLoop();
   }
 }

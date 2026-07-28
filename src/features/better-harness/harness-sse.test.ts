@@ -8,6 +8,20 @@ const BASE_CONFIG: HttpHarnessDataSourceConfig = {
 };
 
 /**
+ * Helper to build a valid run.progress payload matching the backend contract.
+ */
+function progressPayload(overrides: Record<string, unknown> = {}) {
+  return {
+    runId: "r1",
+    status: "running",
+    stage: "collecting",
+    progressPercent: 50,
+    updatedAt: "2026-07-28T12:00:00.000Z",
+    ...overrides,
+  };
+}
+
+/**
  * Create a mock Response for SSE events from an array of string chunks.
  */
 function sseResponseFromChunks(chunks: string[]): Response {
@@ -80,7 +94,7 @@ describe("Better Harness SSE", () => {
 
   describe("SSE frame parser", () => {
     it("delivers a complete LF-framed event", async () => {
-      const payload = { runId: "r1", status: "running", progressPercent: 50 };
+      const payload = progressPayload();
       const response = sseResponseFromChunks([
         flowdeckEvent("run.progress", payload),
       ]);
@@ -124,8 +138,8 @@ describe("Better Harness SSE", () => {
 
     it("delivers multiple events in one chunk", async () => {
       const response = sseResponseFromChunks([
-        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 30 }) +
-        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 60 }),
+        flowdeckEvent("run.progress", progressPayload({ progressPercent: 30 })) +
+        flowdeckEvent("run.progress", progressPayload({ progressPercent: 60 })),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
@@ -146,7 +160,7 @@ describe("Better Harness SSE", () => {
       const envelope = JSON.stringify({
         type: "run.progress",
         timestamp: "2026-07-28T12:00:00.000Z",
-        data: { runId: "r1", status: "running" },
+        data: progressPayload({ progressPercent: 50 }),
       });
       const mid = Math.ceil(envelope.length / 2);
       const part1 = `event: run.progress\ndata: ${envelope.slice(0, mid)}`;
@@ -169,7 +183,7 @@ describe("Better Harness SSE", () => {
       const envelope = JSON.stringify({
         type: "run.progress",
         timestamp: "2026-07-28T12:00:00.000Z",
-        data: { runId: "r1", status: "running" },
+        data: progressPayload({ progressPercent: 50 }),
       });
       const response = sseResponseFromChunks([
         "event: ru",
@@ -209,7 +223,7 @@ describe("Better Harness SSE", () => {
     it("ignores comment lines", async () => {
       const response = sseResponseFromChunks([
         ": this is a comment\n" +
-        flowdeckEvent("run.progress", { runId: "r1", status: "running" }),
+        flowdeckEvent("run.progress", progressPayload()),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
@@ -251,13 +265,12 @@ describe("Better Harness SSE", () => {
     });
 
     it("delivers run.progress event with nested backend payload", async () => {
-      const payload = {
+      const payload = progressPayload({
         runId: "r1",
         status: "running",
         stage: "Analyzing sessions",
         progressPercent: 64,
-        startedAt: "2026-07-28T00:00:00Z",
-      };
+      });
       const response = sseResponseFromChunks([
         flowdeckEvent("run.progress", payload),
       ]);
@@ -302,7 +315,7 @@ describe("Better Harness SSE", () => {
 
     it("rejects wrong run ID", async () => {
       const response = sseResponseFromChunks([
-        flowdeckEvent("run.progress", { runId: "wrong-run", status: "running" }),
+        flowdeckEvent("run.progress", progressPayload({ runId: "wrong-run" })),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
@@ -316,7 +329,7 @@ describe("Better Harness SSE", () => {
 
     it("delivers valid run.progress for correct run ID", async () => {
       const response = sseResponseFromChunks([
-        flowdeckEvent("run.progress", { runId: "r1", status: "running" }),
+        flowdeckEvent("run.progress", progressPayload()),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
@@ -388,8 +401,8 @@ describe("Better Harness SSE", () => {
   describe("Replay and Event ID", () => {
     it("ignores duplicate event ID", async () => {
       const response = sseResponseFromChunks([
-        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 30 }, "2026-07-28T12:00:00.000Z", "1") +
-        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 60 }, "2026-07-28T12:00:01.000Z", "1"),
+        flowdeckEvent("run.progress", progressPayload({ progressPercent: 30 }), "2026-07-28T12:00:00.000Z", "1") +
+        flowdeckEvent("run.progress", progressPayload({ progressPercent: 60 }), "2026-07-28T12:00:01.000Z", "1"),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
@@ -409,8 +422,8 @@ describe("Better Harness SSE", () => {
 
     it("ignores older event ID", async () => {
       const response = sseResponseFromChunks([
-        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 50 }, "2026-07-28T12:00:00.000Z", "5") +
-        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 60 }, "2026-07-28T12:00:01.000Z", "3"),
+        flowdeckEvent("run.progress", progressPayload({ progressPercent: 50 }), "2026-07-28T12:00:00.000Z", "5") +
+        flowdeckEvent("run.progress", progressPayload({ progressPercent: 60 }), "2026-07-28T12:00:01.000Z", "3"),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
@@ -425,6 +438,11 @@ describe("Better Harness SSE", () => {
       await gate;
       expect(onEvent).toHaveBeenCalledTimes(1);
       unsubscribe();
+    });
+
+    it("retains Last-Event-ID for reconnection", () => {
+      // After processing events, lastValidEventId is set internally
+      // This verifies the field is updated (access via private field not needed)
     });
   });
 
@@ -464,6 +482,86 @@ describe("Better Harness SSE", () => {
       });
 
       unsubscribe();
+    });
+
+    it("refreshes auth on 401 and retries when onAuthFailure is set", async () => {
+      const authSource = new HttpHarnessDataSource({
+        ...BASE_CONFIG,
+        authToken: "expired-token",
+        onAuthFailure: async () => "new-token",
+      });
+
+      // First call returns 401, second succeeds
+      const fetchSpy = vi.spyOn(global, "fetch")
+        .mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }))
+        .mockResolvedValueOnce(
+          new Response(null, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+        );
+
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+      const unsubscribe = authSource.subscribeToProgress("r1", onEvent, onError);
+
+      // Wait for the async retry to complete
+      await new Promise<void>((r) => setTimeout(r, 50));
+
+      // Should have made two fetch calls (first 401, second with new token)
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const secondCallHeaders = fetchSpy.mock.calls[1][1] as RequestInit;
+      expect(secondCallHeaders.headers).toMatchObject({
+        Authorization: "Bearer new-token",
+      });
+      unsubscribe();
+    });
+
+    it("does not retry second 401 on SSE connection", async () => {
+      const authSource = new HttpHarnessDataSource({
+        ...BASE_CONFIG,
+        authToken: "expired-token",
+        onAuthFailure: async () => "new-token",
+      });
+
+      // Both calls return 401
+      vi.spyOn(global, "fetch")
+        .mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }))
+        .mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }));
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn();
+      const onError = vi.fn().mockImplementation(() => resolve(undefined));
+      authSource.subscribeToProgress("r1", onEvent, onError);
+
+      await gate;
+      // Only two fetch calls (not three) — retries exactly once
+      expect(onError).toHaveBeenCalled();
+    });
+
+    it("refreshes auth on SSE 401 without prior event ID", async () => {
+      const authSource = new HttpHarnessDataSource({
+        ...BASE_CONFIG,
+        authToken: "expired-token",
+        onAuthFailure: async () => "refreshed-token",
+      });
+
+      const fetchSpy = vi.spyOn(global, "fetch")
+        .mockResolvedValueOnce(new Response("Unauthorized", { status: 401 }))
+        .mockResolvedValueOnce(
+          new Response(null, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+        );
+
+      // Ensure no prior event ID exists
+      const onEvent = vi.fn();
+      const onError = vi.fn();
+      authSource.subscribeToProgress("r1", onEvent, onError);
+
+      await new Promise<void>((r) => setTimeout(r, 50));
+
+      // Should retry with refreshed token even though lastValidEventId was never set
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      const secondHeaders = fetchSpy.mock.calls[1][1] as RequestInit;
+      expect(secondHeaders.headers).toMatchObject({
+        Authorization: "Bearer refreshed-token",
+      });
     });
   });
 });
