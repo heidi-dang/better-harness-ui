@@ -1,6 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-// Test assertions on raw HTTP responses require `any` type — there is no
-// typed schema for every intermediate response field.
 /**
  * End-to-end FlowDeck lifecycle integration test.
  *
@@ -30,7 +27,8 @@ test.describe("FlowDeck HTTP API", () => {
   test("health endpoint returns ok", async () => {
     const res = await fetch(`${BASE_URL}/health`);
     expect(res.status).toBe(200);
-    const body: any = await res.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await res.json() as any;
     expect(body.status).toBe("ok");
   });
 
@@ -46,7 +44,8 @@ test.describe("FlowDeck HTTP API", () => {
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/availability`,
     );
     expect(res.status).toBe(200);
-    const body: any = await res.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await res.json() as any;
     expect(body.available).toBe(true);
   });
 
@@ -60,7 +59,8 @@ test.describe("FlowDeck HTTP API", () => {
       },
     );
     expect(res.status).toBe(201);
-    const body: any = await res.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await res.json() as any;
     expect(body.accepted).toBe(true);
     expect(body.runId).toBeDefined();
     expect(typeof body.runId).toBe("string");
@@ -76,7 +76,8 @@ test.describe("FlowDeck HTTP API", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
     expect(runId).toBeDefined();
 
     // Poll until persisted
@@ -86,7 +87,8 @@ test.describe("FlowDeck HTTP API", () => {
         `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs/${runId}`,
       );
       if (getRes.status === 200) {
-        const run: any = await getRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const run = await getRes.json() as any;
         expect(run.runId).toBe(runId);
         return;
       }
@@ -112,7 +114,8 @@ test.describe("FlowDeck HTTP API", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
     expect(runId).toBeDefined();
     await new Promise((r) => setTimeout(r, 3_000));
 
@@ -187,7 +190,8 @@ test.describe("FlowDeck HTTP API", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
 
     // Connect SSE and wait long enough for a heartbeat (interval is 15 s)
     const sseData = await new Promise<string>((resolve) => {
@@ -233,7 +237,8 @@ test.describe("FlowDeck HTTP API", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
     expect(runId).toBeDefined();
     await new Promise((r) => setTimeout(r, 3_000));
 
@@ -322,14 +327,16 @@ test.describe("FlowDeck HTTP API", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
 
     const cancelRes = await fetch(
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/runs/${runId}/cancel`,
       { method: "POST" },
     );
     expect(cancelRes.status).toBe(200);
-    const body: any = await cancelRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body = await cancelRes.json() as any;
     expect(body.accepted).toBe(true);
   });
 
@@ -342,7 +349,8 @@ test.describe("FlowDeck HTTP API", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
 
     // First cancel
     const cancel1 = await fetch(
@@ -350,7 +358,8 @@ test.describe("FlowDeck HTTP API", () => {
       { method: "POST" },
     );
     expect(cancel1.status).toBe(200);
-    expect((await cancel1.json() as any).accepted).toBe(true);
+
+    expect((await cancel1.json() as Record<string, unknown>).accepted).toBe(true);
 
     // Second cancel should return accepted:false
     const cancel2 = await fetch(
@@ -358,7 +367,8 @@ test.describe("FlowDeck HTTP API", () => {
       { method: "POST" },
     );
     expect(cancel2.status).toBe(200);
-    const body2: any = await cancel2.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body2 = await cancel2.json() as any;
     expect(body2.accepted).toBe(false);
   });
 });
@@ -417,7 +427,8 @@ test.describe("FlowDeck Browser UI", () => {
     const runResponse = await runRequest.response();
     expect(runResponse).not.toBeNull();
     expect(runResponse!.status()).toBe(201);
-    const runBody: any = await runResponse!.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const runBody = await runResponse!.json() as any;
     expect(runBody.accepted).toBe(true);
     expect(runBody.runId).toBeDefined();
 
@@ -439,7 +450,8 @@ test.describe("FlowDeck Browser UI", () => {
         body: JSON.stringify({ mode: "full" }),
       },
     );
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
     expect(runId).toBeDefined();
 
     // Quickly navigate while the run is still executing
@@ -549,7 +561,8 @@ test.describe("FlowDeck Plan Fix", () => {
       },
     );
     expect(runRes.status).toBe(201);
-    const { runId }: any = await runRes.json();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { runId } = await runRes.json() as any;
     expect(runId).toBeDefined();
     // Wait for completion
     await new Promise((r) => setTimeout(r, 4_000));
@@ -559,8 +572,8 @@ test.describe("FlowDeck Plan Fix", () => {
       `${BASE_URL}/api/v1/servers/${SERVER_KEY}/projects/${PROJECT_KEY}/better-harness/report`,
     );
     expect(reportRes.status).toBe(200);
-    const report: any = await reportRes.json();
-    expect(report.findings).toBeDefined();
+
+    const report = await reportRes.json() as { findings: Array<{ id: string }> };
     expect(report.findings.length).toBeGreaterThan(0);
     const findingId: string = report.findings[0].id;
     console.log(`  Plan Fix target: ${findingId}`);
@@ -574,20 +587,18 @@ test.describe("FlowDeck Plan Fix", () => {
         body: JSON.stringify({ findingIds: [findingId] }),
       },
     );
-    const planBody: any = await planRes.json();
+
+    const planBody = await planRes.json() as { accepted: boolean; results?: Array<Record<string, unknown> & { opencodeSessionId?: string; repairOperationId?: string }>; error?: string };
     console.log(`  Plan Fix response:`, JSON.stringify(planBody));
 
     // 4. Assert the response structure
     expect(planBody.accepted).toBeDefined();
     if (planBody.accepted) {
-      // If accepted, should have a repairSessionId or results
-      if (planBody.repairSessionId) {
-        console.log(`  Repair session ID: ${planBody.repairSessionId}`);
-      } else if (planBody.results && planBody.results.length > 0) {
+      if (planBody.results && planBody.results.length > 0) {
+        const r = planBody.results[0];
+        if (r.opencodeSessionId) console.log(`  OpenCode session ID: ${r.opencodeSessionId}`);
+        if (r.repairOperationId) console.log(`  Repair operation ID: ${r.repairOperationId}`);
         console.log(`  Results:`, JSON.stringify(planBody.results));
-        if (planBody.results[0].repairSessionId) {
-          console.log(`  Result repair session ID: ${planBody.results[0].repairSessionId}`);
-        }
       }
     } else {
       // Not accepted — log the error for investigation
@@ -595,3 +606,6 @@ test.describe("FlowDeck Plan Fix", () => {
     }
   });
 });
+
+
+
