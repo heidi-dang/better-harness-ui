@@ -13,9 +13,10 @@
  *   FLOWDECK_DIR  – path to FlowDeck repo (default: ../FlowDeck)
  *   KEEP_SERVERS  – set to "true" to leave servers running (debug)
  */
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { existsSync, rmSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const UI_DIR = resolve(__dirname, "..");
@@ -51,10 +52,16 @@ async function shutdown() {
   console.log("[integration] Shutting down child processes...");
   const signals = PROCESSES.map(async (proc, i) => {
     const label = `process[${i}]`;
-    try { proc.kill("SIGTERM"); } catch { return { label, exited: true, forced: true }; }
+
+    // If the process has already exited (e.g. Playwright finished), skip
+    if (proc.exitCode !== null) {
+      return { label, exited: true, alreadyExited: true, code: proc.exitCode };
+    }
+
+    killProcessTree(proc);
     const result = await waitForExit(proc, 5_000);
     if (result.timedOut) {
-      try { proc.kill("SIGKILL"); } catch {}
+      killProcessTree(proc); // Force kill
       return { label, exited: false, timedOut: true };
     }
     return { label, exited: true, code: result.code };
@@ -74,12 +81,9 @@ async function shutdown() {
 
   // Verify temp directories were removed
   if (flowdeckTempDir) {
-    const { existsSync } = await import("node:fs");
     const stillExists = existsSync(flowdeckTempDir);
     if (stillExists) {
       console.log(`[integration]   WARNING: temp dir ${flowdeckTempDir} still exists`);
-      // Best-effort cleanup
-      const { rmSync } = await import("node:fs");
       try { rmSync(flowdeckTempDir, { recursive: true, force: true }); } catch {}
     } else {
       console.log(`[integration]   Temp dir ${flowdeckTempDir} was removed`);
@@ -89,10 +93,22 @@ async function shutdown() {
   return allExited;
 }
 
+function killProcessTree(proc) {
+  // If the process already exited, skip
+  if (proc.exitCode !== null) return;
+  if (process.platform === "win32") {
+    // On Windows, kill the entire process tree via TaskKill.
+    // This handles shell:true cases where the actual child survives.
+    try { execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
+  } else {
+    try { proc.kill("SIGKILL"); } catch {}
+  }
+}
+
 function cleanupSync() {
   console.log(`\n[integration] Force cleanup...`);
   for (const proc of PROCESSES) {
-    try { proc.kill("SIGKILL"); } catch {}
+    killProcessTree(proc);
   }
 }
 
