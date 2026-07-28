@@ -21,97 +21,182 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const UI_DIR = resolve(__dirname, "..");
 const FLOWDECK_DIR = resolve(process.env.FLOWDECK_DIR || resolve(UI_DIR, "..", "FlowDeck"));
 const KEEP = process.env.KEEP_SERVERS === "true";
-const SHELL = process.platform === "win32"; // Windows needs shell for .cmd wrappers
+const SHELL = process.platform === "win32";
 
 // ── Tracked processes for cleanup ───────────────────────────────────────
 const PROCESSES = [];
+let flowdeckTempDir = null; // set after FlowDeck start, verified on cleanup
 
-function cleanup(signal) {
-  console.log(`\n[integration] ${signal} — cleaning up...`);
-  for (const proc of PROCESSES) {
-    try { proc.kill("SIGTERM"); } catch {}
-  }
-  setTimeout(() => process.exit(1), 3000);
+function waitForExit(proc, timeoutMs) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      resolve({ code: null, timedOut: true });
+    }, timeoutMs);
+    proc.on("close", (code) => {
+      clearTimeout(timer);
+      resolve({ code, timedOut: false });
+    });
+    proc.on("error", () => {
+      clearTimeout(timer);
+      resolve({ code: null, timedOut: false });
+    });
+  });
 }
-process.on("SIGINT", () => cleanup("SIGINT"));
-process.on("SIGTERM", () => cleanup("SIGTERM"));
+
+/**
+ * Send SIGTERM to all tracked child processes and await their exit.
+ * Returns a summary of which processes exited cleanly.
+ */
+async function shutdown() {
+  console.log("[integration] Shutting down child processes...");
+  const signals = PROCESSES.map(async (proc, i) => {
+    const label = `process[${i}]`;
+    try { proc.kill("SIGTERM"); } catch { return { label, exited: true, forced: true }; }
+    const result = await waitForExit(proc, 5_000);
+    if (result.timedOut) {
+      try { proc.kill("SIGKILL"); } catch {}
+      return { label, exited: false, timedOut: true };
+    }
+    return { label, exited: true, code: result.code };
+  });
+  const results = await Promise.all(signals);
+
+  let allExited = true;
+  for (const r of results) {
+    if (!r.exited || r.timedOut) {
+      console.log(`[integration]   ${r.label} did not exit cleanly`);
+      allExited = false;
+    }
+  }
+  if (allExited) {
+    console.log("[integration]   All child processes exited cleanly");
+  }
+
+  // Verify temp directories were removed
+  if (flowdeckTempDir) {
+    const { existsSync } = await import("node:fs");
+    const stillExists = existsSync(flowdeckTempDir);
+    if (stillExists) {
+      console.log(`[integration]   WARNING: temp dir ${flowdeckTempDir} still exists`);
+      // Best-effort cleanup
+      const { rmSync } = await import("node:fs");
+      try { rmSync(flowdeckTempDir, { recursive: true, force: true }); } catch {}
+    } else {
+      console.log(`[integration]   Temp dir ${flowdeckTempDir} was removed`);
+    }
+  }
+
+  return allExited;
+}
+
+function cleanupSync() {
+  console.log(`\n[integration] Force cleanup...`);
+  for (const proc of PROCESSES) {
+    try { proc.kill("SIGKILL"); } catch {}
+  }
+}
+
+process.on("SIGINT", async () => {
+  await shutdown().catch(() => {});
+  process.exit(1);
+});
+process.on("SIGTERM", async () => {
+  await shutdown().catch(() => {});
+  process.exit(1);
+});
 
 // ── Main ────────────────────────────────────────────────────────────────
 async function main() {
-  // 1. Spawn FlowDeck standalone server (prints JSON metadata on first line)
-  console.log("[integration] Starting FlowDeck standalone server...");
-  const flowdeckProc = spawn(
-    "bun run standalone:start",
-    [],
-    { cwd: FLOWDECK_DIR, stdio: ["ignore", "pipe", "pipe"], shell: SHELL },
-  );
-  PROCESSES.push(flowdeckProc);
+  let exitCode = 1;
 
-  const metadataLine = await readFirstLine(flowdeckProc.stdout, 15_000);
-  let flowdeckMeta;
   try {
-    flowdeckMeta = JSON.parse(metadataLine);
-  } catch {
-    throw new Error(`Failed to parse FlowDeck metadata: ${metadataLine}`);
-  }
+    // 1. Spawn FlowDeck standalone server
+    console.log("[integration] Starting FlowDeck standalone server...");
+    const flowdeckProc = spawn(
+      "bun run standalone:start",
+      [],
+      { cwd: FLOWDECK_DIR, stdio: ["ignore", "pipe", "pipe"], shell: SHELL },
+    );
+    PROCESSES.push(flowdeckProc);
 
-  const baseUrl = flowdeckMeta.baseUrl;
-  const serverKey = flowdeckMeta.serverKey;
-  const projectKey = flowdeckMeta.projectKey;
-  console.log(`[integration] FlowDeck server: ${baseUrl}`);
-  console.log(`[integration]   key: ${serverKey} / ${projectKey}`);
+    const metadataLine = await readFirstLine(flowdeckProc.stdout, 15_000);
+    let flowdeckMeta;
+    try {
+      flowdeckMeta = JSON.parse(metadataLine);
+    } catch {
+      throw new Error(`Failed to parse FlowDeck metadata: ${metadataLine}`);
+    }
 
-  // 2. Wait for health endpoint
-  console.log("[integration] Waiting for health...");
-  await waitForHealth(baseUrl, 30_000);
+    const baseUrl = flowdeckMeta.baseUrl;
+    const serverKey = flowdeckMeta.serverKey;
+    const projectKey = flowdeckMeta.projectKey;
+    console.log(`[integration] FlowDeck server: ${baseUrl}`);
+    console.log(`[integration]   key: ${serverKey} / ${projectKey}`);
 
-  // 3. Start Vite with FlowDeck API URL
-  console.log("[integration] Starting Vite...");
-  const viteProc = spawn(
-    "npx vite --port 0",
-    [],
-    {
-      cwd: UI_DIR,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        VITE_HARNESS_API_URL: baseUrl,
-        VITE_HARNESS_SERVER_KEY: serverKey,
-        VITE_HARNESS_PROJECT_KEY: projectKey,
+    // 2. Wait for health endpoint
+    console.log("[integration] Waiting for health...");
+    await waitForHealth(baseUrl, 30_000);
+
+    // 3. Start Vite with FlowDeck API URL
+    console.log("[integration] Starting Vite...");
+    const viteProc = spawn(
+      "npx vite --port 0",
+      [],
+      {
+        cwd: UI_DIR,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          VITE_HARNESS_API_URL: baseUrl,
+          VITE_HARNESS_SERVER_KEY: serverKey,
+          VITE_HARNESS_PROJECT_KEY: projectKey,
+        },
+        shell: SHELL,
       },
-      shell: SHELL,
-    },
-  );
-  PROCESSES.push(viteProc);
+    );
+    PROCESSES.push(viteProc);
 
-  const vitePort = await parseVitePort(viteProc, 30_000);
-  console.log(`[integration] Vite at http://localhost:${vitePort}`);
+    const vitePort = await parseVitePort(viteProc, 30_000);
+    console.log(`[integration] Vite at http://localhost:${vitePort}`);
 
-  // 4. Run Playwright tests
-  console.log("[integration] Running Playwright tests...");
-  const playArgs = [
-    "npx playwright test --config playwright.integration.config.ts",
-  ];
-  // spawnProcess uses shell too
-  const playResult = await spawnProcess(playArgs[0], [], {
-    cwd: UI_DIR,
-    env: {
+    // 4. Run Playwright tests
+    console.log("[integration] Running Playwright tests...");
+
+    // Pass FlowDeck connection info to the Playwright process via env vars
+    const playEnv = {
       ...process.env,
-      VITE_HARNESS_API_URL: baseUrl,
-      VITE_HARNESS_SERVER_KEY: serverKey,
-      VITE_HARNESS_PROJECT_KEY: projectKey,
+      FLOWDECK_BASE_URL: baseUrl,
+      SERVER_KEY: serverKey,
+      PROJECT_KEY: projectKey,
       PLAYWRIGHT_BASE_URL: `http://localhost:${vitePort}`,
-    },
-  });
+    };
 
-  console.log(playResult.stdout);
-  if (playResult.stderr) {
-    console.error(playResult.stderr);
+    const playResult = await spawnProcess(
+      "npx playwright test --config playwright.integration.config.ts",
+      [],
+      { cwd: UI_DIR, env: playEnv },
+    );
+
+    console.log(playResult.stdout);
+    if (playResult.stderr) {
+      console.error(playResult.stderr);
+    }
+
+    exitCode = playResult.code ?? 1;
+  } catch (err) {
+    console.error("[integration] Fatal:", err);
+    exitCode = 1;
+  } finally {
+    // 5. Deterministic cleanup — await child exits, verify temp dirs
+    if (!KEEP) {
+      const allExited = await shutdown();
+      if (!allExited) {
+        console.log("[integration] WARNING: not all children exited — forcing exit");
+        cleanupSync();
+      }
+    }
+    process.exit(exitCode);
   }
-
-  // 5. Cleanup
-  if (!KEEP) cleanup("cleanup");
-  process.exit(playResult.code ?? 1);
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────
@@ -135,7 +220,6 @@ function readFirstLine(stream, timeoutMs) {
 }
 
 function stripAnsi(str) {
-  // Remove ANSI escape sequences: ESC [ <params> m
   return str.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
@@ -148,7 +232,6 @@ function parseVitePort(viteProc, timeoutMs) {
     const onData = (chunk) => {
       buffer += chunk.toString();
       const clean = stripAnsi(buffer);
-      // Vite prints "Local:   http://localhost:PORT/"
       const m = clean.match(/Local:\s+http:\/\/localhost:(\d+)/);
       if (m) {
         clearTimeout(timeout);
@@ -203,8 +286,4 @@ function waitForHealth(baseUrl, timeoutMs) {
   });
 }
 
-main().catch((err) => {
-  console.error("[integration] Fatal:", err);
-  cleanup("error");
-  process.exit(1);
-});
+main();

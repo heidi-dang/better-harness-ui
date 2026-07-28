@@ -7,10 +7,13 @@ import { defineConfig } from "@playwright/test";
  * (run-integration.mjs) starts it separately with VITE_HARNESS_API_URL
  * set.  The user-configured PLAYWRIGHT_BASE_URL env var tells Playwright
  * where to find the already-running dev server.
+ *
+ * testMatch is restricted to the FlowDeck lifecycle spec to avoid
+ * counting the responsive-viewport suite in integration results.
  */
 export default defineConfig({
-  testDir: "./e2e",
-  timeout: 30000,
+  testMatch: ["**/flowdeck-lifecycle.spec.ts"],
+  timeout: 30_000,
   retries: 1,
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL || "http://localhost:3000",
