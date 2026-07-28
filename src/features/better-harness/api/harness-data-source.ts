@@ -29,7 +29,7 @@ export interface HarnessDataSource {
 
   getHistory(): Promise<HarnessReport[]>;
 
-  getRunProgress?(): Promise<HarnessRunProgress | undefined>;
+  getRunProgress?(runId?: string): Promise<HarnessRunProgress | undefined>;
 
   regenerate(): Promise<{
     accepted: boolean;

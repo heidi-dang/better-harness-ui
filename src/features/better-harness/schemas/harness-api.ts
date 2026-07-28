@@ -3,6 +3,12 @@ import { HarnessReport } from "../types";
 import { HarnessReportSchema } from "./harness-report";
 import { HarnessRunProgressSchema } from "./harness-run";
 
+// ── Discriminated HTTP result for empty-state semantics ───────────────
+
+export type ValidatedHttpResult<T> =
+  | { kind: "value"; value: T }
+  | { kind: "empty"; status: 204 | 404 };
+
 // ── HTTP API Response Schemas ──────────────────────────────────────────
 
 export const AvailabilityResponseSchema = z
@@ -18,6 +24,7 @@ export const StartRunResponseSchema = z
   .object({
     accepted: z.boolean(),
     runId: z.string().min(1).optional(),
+    error: z.string().optional(),
   })
   .strict();
 
@@ -76,84 +83,262 @@ export const VerifyResponseSchema = z
 
 export type VerifyResponse = z.infer<typeof VerifyResponseSchema>;
 
-export const SSEEventSchema = z.object({
-  type: z.string(),
-  data: z.unknown(),
-});
-
-export type SSEEvent = z.infer<typeof SSEEventSchema>;
-
-// ── Response validators that preserve full error context ───────────────
+// ── FlowDeck Cancel Response (exact contract) ─────────────────────────
+// FlowDeck returns: { accepted: boolean, error?: string }
+// No null/undefined accepted. accepted:false is explicitly a failure.
 
 export const CancelResponseSchema = z
   .object({
-    accepted: z.boolean(),
+    accepted: z.literal(true),
+    error: z.string().optional(),
   })
-  .strict()
-  .optional()
-  .or(z.null());
+  .strict();
 
 export type CancelResponse = z.infer<typeof CancelResponseSchema>;
 
-export function validateCancelResponse(
-  data: unknown
-): { valid: true; value: void } | { valid: false; error: string } {
-  const result = CancelResponseSchema.safeParse(data);
-  if (result.success) return { valid: true, value: undefined };
-  return { valid: false, error: formatZodIssues("CancelResponse", result.error.issues) };
+// ── FlowDeck SSE Schemas ──────────────────────────────────────────────
+// FlowDeck SSE wire format:
+//   id: <seq>
+//   event: <named-event-type>
+//   data: {"type":"<named-event-type>","timestamp":"<iso8601>","data":<payload>}
+//
+// The data: line contains a JSON envelope with:
+//   - type: must match the named SSE event
+//   - timestamp: ISO 8601
+//   - data: event-specific payload
+
+export const SSESupportedEventEnum = z.enum([
+  "connected",
+  "heartbeat",
+  "run.queued",
+  "run.started",
+  "collector.started",
+  "collector.completed",
+  "analysis.started",
+  "finding.created",
+  "run.progress",
+  "report.completed",
+  "run.cancelled",
+  "run.failed",
+]);
+
+export type SSESupportedEvent = z.infer<typeof SSESupportedEventEnum>;
+
+/** The JSON envelope inside the SSE data: line. */
+export const SSEEnvelopeSchema = z
+  .object({
+    type: SSESupportedEventEnum,
+    timestamp: z.string().min(1),
+    data: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+
+export type SSEEnvelope = z.infer<typeof SSEEnvelopeSchema>;
+
+// ── Event-specific payload schemas ────────────────────────────────────
+
+export const SSERunProgressPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    status: z.enum(["queued", "running", "completed", "failed", "cancelled"]),
+    stage: z.string().optional(),
+    progressPercent: z.number().min(0).max(100).optional(),
+    startedAt: z.string().optional(),
+    updatedAt: z.string().optional(),
+    estimatedTimeRemainingSeconds: z.number().nonnegative().optional(),
+    errorMessage: z.string().optional(),
+  })
+  .strict();
+
+export type SSERunProgressPayload = z.infer<typeof SSERunProgressPayloadSchema>;
+
+export const SSEReportCompletedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+  })
+  .strict();
+
+export const SSERunFailedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    errorMessage: z.string().optional(),
+  })
+  .strict();
+
+export const SSERunCancelledPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+  })
+  .strict();
+
+export const SSEConnectedPayloadSchema = z
+  .object({
+    clientId: z.string().min(1),
+  })
+  .strict();
+
+export const SSEHeartbeatPayloadSchema = z
+  .object({
+    time: z.string().min(1),
+  })
+  .strict();
+
+export const SSERunQueuedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+  })
+  .strict();
+
+export const SSERunStartedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+  })
+  .strict();
+
+export const SSECollectorStartedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    collector: z.string().min(1),
+  })
+  .strict();
+
+export const SSECollectorCompletedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    collector: z.string().min(1),
+    findingsCount: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+
+export const SSEAnalysisStartedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+  })
+  .strict();
+
+export const SSEFindingCreatedPayloadSchema = z
+  .object({
+    runId: z.string().min(1),
+    findingId: z.string().min(1),
+    dimension: z.string().min(1),
+    priority: z.string().min(1),
+  })
+  .strict();
+
+/**
+ * Map SSE envelope type to its payload validator.
+ */
+export function getPayloadValidator(
+  eventType: SSESupportedEvent,
+): z.ZodType<unknown> {
+  switch (eventType) {
+    case "connected":
+      return SSEConnectedPayloadSchema;
+    case "heartbeat":
+      return SSEHeartbeatPayloadSchema;
+    case "run.queued":
+      return SSERunQueuedPayloadSchema;
+    case "run.started":
+      return SSERunStartedPayloadSchema;
+    case "collector.started":
+      return SSECollectorStartedPayloadSchema;
+    case "collector.completed":
+      return SSECollectorCompletedPayloadSchema;
+    case "analysis.started":
+      return SSEAnalysisStartedPayloadSchema;
+    case "finding.created":
+      return SSEFindingCreatedPayloadSchema;
+    case "run.progress":
+      return SSERunProgressPayloadSchema;
+    case "report.completed":
+      return SSEReportCompletedPayloadSchema;
+    case "run.failed":
+      return SSERunFailedPayloadSchema;
+    case "run.cancelled":
+      return SSERunCancelledPayloadSchema;
+  }
 }
 
-export function validateAvailabilityResponse(
-  data: unknown
-): { valid: true; value: AvailabilityResponse } | { valid: false; error: string } {
-  const result = AvailabilityResponseSchema.safeParse(data);
+/**
+ * Parsed and validated SSE frame, after envelope validation.
+ */
+export interface ValidatedSSEFrame {
+  eventId: string | undefined;
+  envelope: SSEEnvelope;
+  payload: unknown;
+}
+
+/**
+ * Validated SSE frame from an incremental parser.
+ */
+export interface SSEFrame {
+  id?: string;
+  event: string;
+  data: string;
+}
+
+// ── Response validator helpers ────────────────────────────────────────
+
+type ValidationResult<T> =
+  | { valid: true; value: T }
+  | { valid: false; error: string };
+
+function formatZodIssues(label: string, issues: z.ZodIssue[]): string {
+  const details = issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
+  return `Invalid ${label}: ${details}`;
+}
+
+function validateWith<T>(
+  schema: z.ZodType<T>,
+  label: string,
+  data: unknown,
+): ValidationResult<T> {
+  const result = schema.safeParse(data);
   if (result.success) return { valid: true, value: result.data };
-  return { valid: false, error: formatZodIssues("AvailabilityResponse", result.error.issues) };
+  return { valid: false, error: formatZodIssues(label, result.error.issues) };
+}
+
+// ── HTTP Response Validators ──────────────────────────────────────────
+
+export function validateAvailabilityResponse(
+  data: unknown,
+): ValidationResult<AvailabilityResponse> {
+  return validateWith(AvailabilityResponseSchema, "AvailabilityResponse", data);
 }
 
 export function validateStartRunResponse(
-  data: unknown
-): { valid: true; value: StartRunResponse } | { valid: false; error: string } {
-  const result = StartRunResponseSchema.safeParse(data);
-  if (result.success) return { valid: true, value: result.data };
-  return { valid: false, error: formatZodIssues("StartRunResponse", result.error.issues) };
+  data: unknown,
+): ValidationResult<StartRunResponse> {
+  return validateWith(StartRunResponseSchema, "StartRunResponse", data);
 }
 
 export function validatePlanFixResponse(
-  data: unknown
-): { valid: true; value: PlanFixResponse } | { valid: false; error: string } {
-  const result = PlanFixResponseSchema.safeParse(data);
-  if (result.success) return { valid: true, value: result.data };
-  return { valid: false, error: formatZodIssues("PlanFixResponse", result.error.issues) };
+  data: unknown,
+): ValidationResult<PlanFixResponse> {
+  return validateWith(PlanFixResponseSchema, "PlanFixResponse", data);
 }
 
 export function validateIgnoreResponse(
-  data: unknown
-): { valid: true; value: IgnoreResponse } | { valid: false; error: string } {
-  const result = IgnoreResponseSchema.safeParse(data);
-  if (result.success) return { valid: true, value: result.data };
-  return { valid: false, error: formatZodIssues("IgnoreResponse", result.error.issues) };
+  data: unknown,
+): ValidationResult<IgnoreResponse> {
+  return validateWith(IgnoreResponseSchema, "IgnoreResponse", data);
 }
 
 export function validateVerifyResponse(
-  data: unknown
-): { valid: true; value: VerifyResponse } | { valid: false; error: string } {
-  const result = VerifyResponseSchema.safeParse(data);
-  if (result.success) return { valid: true, value: result.data };
-  return { valid: false, error: formatZodIssues("VerifyResponse", result.error.issues) };
+  data: unknown,
+): ValidationResult<VerifyResponse> {
+  return validateWith(VerifyResponseSchema, "VerifyResponse", data);
 }
 
 export function validateHarnessReportResponse(
-  data: unknown
-): { valid: true; value: HarnessReport } | { valid: false; error: string } {
-  const result = HarnessReportSchema.safeParse(data);
-  if (result.success) return { valid: true, value: result.data as HarnessReport };
-  return { valid: false, error: formatZodIssues("HarnessReport", result.error.issues) };
+  data: unknown,
+): ValidationResult<HarnessReport> {
+  return validateWith(HarnessReportSchema, "HarnessReport", data);
 }
 
 export function validateHarnessReportArrayResponse(
-  data: unknown
-): { valid: true; value: HarnessReport[] } | { valid: false; error: string } {
+  data: unknown,
+): ValidationResult<HarnessReport[]> {
   const arrSchema = z.array(HarnessReportSchema);
   const result = arrSchema.safeParse(data);
   if (result.success) return { valid: true, value: result.data as HarnessReport[] };
@@ -161,14 +346,15 @@ export function validateHarnessReportArrayResponse(
 }
 
 export function validateRunProgressResponse(
-  data: unknown
-): { valid: true; value: z.infer<typeof HarnessRunProgressSchema> } | { valid: false; error: string } {
-  const result = HarnessRunProgressSchema.safeParse(data);
-  if (result.success) return { valid: true, value: result.data };
-  return { valid: false, error: formatZodIssues("HarnessRunProgress", result.error.issues) };
+  data: unknown,
+): ValidationResult<z.infer<typeof HarnessRunProgressSchema>> {
+  return validateWith(HarnessRunProgressSchema, "HarnessRunProgress", data);
 }
 
-function formatZodIssues(label: string, issues: z.ZodIssue[]): string {
-  const details = issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ");
-  return `Invalid ${label}: ${details}`;
+export function validateCancelResponse(
+  data: unknown,
+): ValidationResult<CancelResponse> {
+  // FlowDeck CancelRunResponseSchema: { accepted: z.boolean(), error?: string }
+  // The UI requires accepted: true for success.
+  return validateWith(CancelResponseSchema, "CancelResponse", data);
 }
