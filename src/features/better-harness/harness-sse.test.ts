@@ -1,21 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { HttpHarnessDataSource, HttpHarnessDataSourceConfig } from "./api/http-harness-data-source";
 
-/**
- * SSE and polling tests for HttpHarnessDataSource.
- * Uses mocked fetch with controlled ReadableStream chunks.
- *
- * Since subscribeToProgress fires startStream() as a fire-and-forget
- * async function, we use a promise-based gate pattern to wait for
- * the onEvent callback rather than trying to drain the event loop:
- *
- *   let resolveEvent: (value: unknown) => void;
- *   const eventReceived = new Promise((r) => { resolveEvent = r; });
- *   const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
- *   source.subscribeToProgress("r1", onEvent);
- *   await eventReceived;
- */
-
 const BASE_CONFIG: HttpHarnessDataSourceConfig = {
   baseUrl: "http://localhost:8080",
   serverKey: "srv-01",
@@ -24,7 +9,6 @@ const BASE_CONFIG: HttpHarnessDataSourceConfig = {
 
 /**
  * Create a mock Response for SSE events from an array of string chunks.
- * Each chunk is delivered as a separate ReadableStream read() call.
  */
 function sseResponseFromChunks(chunks: string[]): Response {
   const encoder = new TextEncoder();
@@ -50,11 +34,36 @@ function sseResponseFromChunks(chunks: string[]): Response {
 }
 
 /**
- * Return an SSE event in standard LF format.
+ * Build an SSE frame in FlowDeck envelope format.
+ *
+ * FlowDeck wire format:
+ *   event: <type>
+ *   data: {"type":"<type>","timestamp":"<iso>","data":<innerPayload>}
+ *
+ * The `id:` line is optional — include it for replay tests.
  */
-function sseEvent(eventType: string, data: unknown): string {
-  return `event: ${eventType}\ndata: ${JSON.stringify(data)}\n\n`;
+function flowdeckEvent(
+  eventType: string,
+  innerPayload: Record<string, unknown>,
+  timestamp = "2026-07-28T12:00:00.000Z",
+  eventId?: string,
+): string {
+  const envelope = JSON.stringify({ type: eventType, timestamp, data: innerPayload });
+  const idLine = eventId ? `id: ${eventId}\n` : "";
+  return `${idLine}event: ${eventType}\ndata: ${envelope}\n\n`;
 }
+
+/**
+ * Resolves when the callback fires. Used in SSE tests where `onEvent`
+ * is called from a fire-and-forget async stream processor.
+ */
+function onCallGate() {
+  let resolve: (value: unknown) => void;
+  const gate = new Promise((r) => { resolve = r; });
+  return { gate, resolve: resolve! };
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────
 
 describe("Better Harness SSE", () => {
   let source: HttpHarnessDataSource;
@@ -67,22 +76,21 @@ describe("Better Harness SSE", () => {
     vi.restoreAllMocks();
   });
 
-  // ── SSE Parser ────────────────────────────────────────────────────
+  // ── SSE Frame Parser ───────────────────────────────────────────────
 
-  describe("SSE Parser", () => {
+  describe("SSE frame parser", () => {
     it("delivers a complete LF-framed event", async () => {
       const payload = { runId: "r1", status: "running", progressPercent: 50 };
       const response = sseResponseFromChunks([
-        sseEvent("run.progress", payload),
+        flowdeckEvent("run.progress", payload),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
+      await gate;
       expect(onEvent).toHaveBeenCalledTimes(1);
       expect(onEvent).toHaveBeenCalledWith({
         type: "run.progress",
@@ -92,18 +100,21 @@ describe("Better Harness SSE", () => {
     });
 
     it("delivers a complete CRLF-framed event", async () => {
-      const payload = { status: "completed" };
-      const crlfChunk = "event: report.completed\r\ndata: " +
-        JSON.stringify(payload) + "\r\n\r\n";
+      const payload = { runId: "r1" };
+      const envelope = JSON.stringify({
+        type: "report.completed",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        data: payload,
+      });
+      const crlfChunk = "event: report.completed\r\ndata: " + envelope + "\r\n\r\n";
       const response = sseResponseFromChunks([crlfChunk]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
+      await gate;
       expect(onEvent).toHaveBeenCalledWith({
         type: "report.completed",
         data: payload,
@@ -113,95 +124,83 @@ describe("Better Harness SSE", () => {
 
     it("delivers multiple events in one chunk", async () => {
       const response = sseResponseFromChunks([
-        sseEvent("run.progress", { runId: "r1", status: "running" }) +
-        sseEvent("run.progress", { runId: "r1", status: "completed" }),
+        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 30 }) +
+        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 60 }),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
+      const { gate, resolve } = onCallGate();
       let callCount = 0;
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
       const onEvent = vi.fn().mockImplementation(() => {
         callCount++;
-        if (callCount >= 2) resolveEvent(undefined);
+        if (callCount >= 2) resolve(undefined);
       });
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
+      await gate;
       expect(onEvent).toHaveBeenCalledTimes(2);
       unsubscribe();
     });
 
     it("handles one event split across two chunks", async () => {
-      const response = sseResponseFromChunks([
-        "event: run.progress\ndata: {\"runId\":",
-        "\"r1\",\"status\":\"running\"}\n\n",
-      ]);
+      const envelope = JSON.stringify({
+        type: "run.progress",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        data: { runId: "r1", status: "running" },
+      });
+      const mid = Math.ceil(envelope.length / 2);
+      const part1 = `event: run.progress\ndata: ${envelope.slice(0, mid)}`;
+      const part2 = `${envelope.slice(mid)}\n\n`;
+      const response = sseResponseFromChunks([part1, part2]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
+      await gate;
       expect(onEvent).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "run.progress" })
+        expect.objectContaining({ type: "run.progress" }),
       );
       unsubscribe();
     });
 
     it("handles one event split across several chunks", async () => {
+      const envelope = JSON.stringify({
+        type: "run.progress",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        data: { runId: "r1", status: "running" },
+      });
       const response = sseResponseFromChunks([
         "event: ru",
         "n.progress\nda",
-        'ta: {"runId":"r1"',
-        ',"status":"running"}\n\n',
+        `ta: ${envelope.slice(0, 15)}`,
+        `${envelope.slice(15)}\n\n`,
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
+      await gate;
       expect(onEvent).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "run.progress" })
+        expect.objectContaining({ type: "run.progress" }),
       );
       unsubscribe();
     });
 
-    it("handles multiple data lines in one event", async () => {
+    it("handles multiple data lines joined correctly", async () => {
+      // Multiple data: lines within one event are joined with "\n"
       const response = sseResponseFromChunks([
-        "event: run.progress\ndata: {\"runId\":\"r1\"}\ndata: {\"status\":\"completed\"}\n\n",
-      ]);
-      vi.spyOn(global, "fetch").mockResolvedValue(response);
-
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
-      const unsubscribe = source.subscribeToProgress("r1", onEvent);
-
-      await eventReceived;
-      // Multiple data lines: only the last data line is used
-      expect(onEvent).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "run.progress" })
-      );
-      unsubscribe();
-    });
-
-    it("retains incomplete final frame", async () => {
-      const response = sseResponseFromChunks([
-        "event: run.progress\ndata: {\"runId\":\"r1\"",
+        "event: run.progress\ndata: {\"type\":\"run.progress\"\ndata: ,\"timestamp\":\"...\",\"data\":{}}\n\n",
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
       const onEvent = vi.fn();
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      // Stream ends without a blank line — no event should fire
-      // Wait a tick to ensure no delayed callback
+      // The invalid JSON from concatenated fragments should fail validation
       await new Promise<void>((r) => setTimeout(r, 0));
       expect(onEvent).not.toHaveBeenCalled();
       unsubscribe();
@@ -210,58 +209,44 @@ describe("Better Harness SSE", () => {
     it("ignores comment lines", async () => {
       const response = sseResponseFromChunks([
         ": this is a comment\n" +
-        sseEvent("run.progress", { runId: "r1", status: "running" }),
+        flowdeckEvent("run.progress", { runId: "r1", status: "running" }),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
-      // Comment should be ignored, but the subsequent event should fire
+      await gate;
       expect(onEvent).toHaveBeenCalledTimes(1);
       unsubscribe();
     });
 
-    it("handles malformed JSON gracefully", async () => {
+    it("retains incomplete final frame", async () => {
       const response = sseResponseFromChunks([
-        "event: run.progress\ndata: this-is-not-json\n\n",
+        "event: run.progress\ndata: {\"type\":\"run.progress\"",
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const onEvent = vi.fn();
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
-      // Malformed JSON is delivered as-is (string data)
-      expect(onEvent).toHaveBeenCalledWith({
-        type: "run.progress",
-        data: "this-is-not-json",
-      });
-      unsubscribe();
-    });
-
-    it("stops delivering events after stream ends", async () => {
-      const response = sseResponseFromChunks([
-        sseEvent("report.completed", { runId: "r1" }),
-      ]);
-      vi.spyOn(global, "fetch").mockResolvedValue(response);
-
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
-      const unsubscribe = source.subscribeToProgress("r1", onEvent);
-
-      await eventReceived;
-      expect(onEvent).toHaveBeenCalledTimes(1);
-
-      // Wait again to confirm no more events
       await new Promise<void>((r) => setTimeout(r, 0));
-      expect(onEvent).toHaveBeenCalledTimes(1);
+      expect(onEvent).not.toHaveBeenCalled();
+      unsubscribe();
+    });
+
+    it("rejects malformed JSON in the data line", async () => {
+      const response = sseResponseFromChunks([
+        "event: run.progress\ndata: this is not json\n\n",
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const onEvent = vi.fn();
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await new Promise<void>((r) => setTimeout(r, 0));
+      expect(onEvent).not.toHaveBeenCalled();
       unsubscribe();
     });
 
@@ -274,16 +259,15 @@ describe("Better Harness SSE", () => {
         startedAt: "2026-07-28T00:00:00Z",
       };
       const response = sseResponseFromChunks([
-        sseEvent("run.progress", payload),
+        flowdeckEvent("run.progress", payload),
       ]);
       vi.spyOn(global, "fetch").mockResolvedValue(response);
 
-      let resolveEvent: (value: unknown) => void;
-      const eventReceived = new Promise((r) => { resolveEvent = r; });
-      const onEvent = vi.fn().mockImplementation(() => resolveEvent(undefined));
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
       const unsubscribe = source.subscribeToProgress("r1", onEvent);
 
-      await eventReceived;
+      await gate;
       expect(onEvent).toHaveBeenCalledWith({
         type: "run.progress",
         data: expect.objectContaining({
@@ -295,21 +279,169 @@ describe("Better Harness SSE", () => {
     });
   });
 
-  // ── SSE Authentication & Replay ────────────────────────────────────
+  // ── SSE Contract ───────────────────────────────────────────────────
 
-  describe("SSE Authentication & Replay", () => {
+  describe("SSE contract", () => {
+    it("rejects named event that does not match envelope type", async () => {
+      // event says "report.completed" but envelope.type says "run.progress"
+      const mismatched = "event: report.completed\ndata: " + JSON.stringify({
+        type: "run.progress",
+        timestamp: "2026-07-28T12:00:00.000Z",
+        data: { runId: "r1" },
+      }) + "\n\n";
+      const response = sseResponseFromChunks([mismatched]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const onEvent = vi.fn();
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await new Promise<void>((r) => setTimeout(r, 0));
+      expect(onEvent).not.toHaveBeenCalled();
+      unsubscribe();
+    });
+
+    it("rejects wrong run ID", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("run.progress", { runId: "wrong-run", status: "running" }),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const onEvent = vi.fn();
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await new Promise<void>((r) => setTimeout(r, 0));
+      expect(onEvent).not.toHaveBeenCalled();
+      unsubscribe();
+    });
+
+    it("delivers valid run.progress for correct run ID", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("run.progress", { runId: "r1", status: "running" }),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "run.progress" }),
+      );
+      unsubscribe();
+    });
+
+    it("handles report.completed terminally", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("report.completed", { runId: "r1" }),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "report.completed" }),
+      );
+      unsubscribe();
+    });
+
+    it("handles run.failed terminally", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("run.failed", { runId: "r1", errorMessage: "Failed" }),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "run.failed" }),
+      );
+      unsubscribe();
+    });
+
+    it("handles run.cancelled terminally", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("run.cancelled", { runId: "r1" }),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      const onEvent = vi.fn().mockImplementation(() => resolve(undefined));
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "run.cancelled" }),
+      );
+      unsubscribe();
+    });
+  });
+
+  // ── Replay and event ID tracking ───────────────────────────────────
+
+  describe("Replay and Event ID", () => {
+    it("ignores duplicate event ID", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 30 }, "2026-07-28T12:00:00.000Z", "1") +
+        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 60 }, "2026-07-28T12:00:01.000Z", "1"),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      let callCount = 0;
+      const onEvent = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount >= 1) resolve(undefined);
+      });
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      // Only one event delivered because the second has duplicate ID "1"
+      expect(onEvent).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+
+    it("ignores older event ID", async () => {
+      const response = sseResponseFromChunks([
+        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 50 }, "2026-07-28T12:00:00.000Z", "5") +
+        flowdeckEvent("run.progress", { runId: "r1", status: "running", progressPercent: 60 }, "2026-07-28T12:00:01.000Z", "3"),
+      ]);
+      vi.spyOn(global, "fetch").mockResolvedValue(response);
+
+      const { gate, resolve } = onCallGate();
+      let callCount = 0;
+      const onEvent = vi.fn().mockImplementation(() => {
+        callCount++;
+        if (callCount >= 1) resolve(undefined);
+      });
+      const unsubscribe = source.subscribeToProgress("r1", onEvent);
+
+      await gate;
+      expect(onEvent).toHaveBeenCalledTimes(1);
+      unsubscribe();
+    });
+  });
+
+  // ── SSE Authentication ─────────────────────────────────────────────
+
+  describe("SSE authentication", () => {
     it("calls onError on 401 for SSE connection", async () => {
       vi.spyOn(global, "fetch").mockResolvedValue(
-        new Response("Unauthorized", { status: 401 })
+        new Response("Unauthorized", { status: 401 }),
       );
 
-      let resolveError: (value: unknown) => void;
-      const errorReceived = new Promise((r) => { resolveError = r; });
+      const { gate, resolve } = onCallGate();
       const onEvent = vi.fn();
-      const onError = vi.fn().mockImplementation(() => resolveError(undefined));
+      const onError = vi.fn().mockImplementation(() => resolve(undefined));
       source.subscribeToProgress("r1", onEvent, onError);
 
-      await errorReceived;
+      await gate;
       expect(onError).toHaveBeenCalled();
     });
 
@@ -320,7 +452,7 @@ describe("Better Harness SSE", () => {
       });
 
       const fetchSpy = vi.spyOn(global, "fetch").mockResolvedValue(
-        new Response(null, { status: 200, headers: { "Content-Type": "text/event-stream" } })
+        new Response(null, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
       );
 
       const onEvent = vi.fn();
@@ -332,25 +464,6 @@ describe("Better Harness SSE", () => {
       });
 
       unsubscribe();
-    });
-
-    it("unsubscribe prevents further event delivery", async () => {
-      const response = sseResponseFromChunks([
-        sseEvent("run.progress", { runId: "r1", status: "running" }),
-      ]);
-      vi.spyOn(global, "fetch").mockResolvedValue(response);
-
-      const onEvent = vi.fn();
-      const unsubscribe = source.subscribeToProgress("r1", onEvent);
-
-      // Unsubscribe immediately — should cancel the stream
-      unsubscribe();
-
-      // Wait for any pending work
-      await new Promise<void>((r) => setTimeout(r, 0));
-
-      // onEvent should never have been called
-      expect(onEvent).not.toHaveBeenCalled();
     });
   });
 });

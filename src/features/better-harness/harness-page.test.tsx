@@ -715,9 +715,19 @@ describe("Better Harness", () => {
       expect(result.valid).toBe(true);
     });
 
-    it("validateCancelResponse validates null cancellation", () => {
-      const result = validateCancelResponse(null);
+    it("validateCancelResponse accepts accepted:true", () => {
+      const result = validateCancelResponse({ accepted: true });
       expect(result.valid).toBe(true);
+    });
+
+    it("validateCancelResponse rejects accepted:false", () => {
+      const result = validateCancelResponse({ accepted: false });
+      expect(result.valid).toBe(false);
+    });
+
+    it("validateCancelResponse rejects null", () => {
+      const result = validateCancelResponse(null);
+      expect(result.valid).toBe(false);
     });
 
     it("validateCancelResponse rejects invalid cancellation shape", () => {
