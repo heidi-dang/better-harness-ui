@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+// Test assertions on raw HTTP responses require `any` type — there is no
+// typed schema for every intermediate response field.
 /**
  * End-to-end FlowDeck lifecycle integration test.
  *
