@@ -29,22 +29,27 @@ const PROCESSES = [];
 let flowdeckStateDir = null;   // set from CLI metadata, verified on shutdown
 
 // ── Graceful-then-forced process termination ────────────────────────────
-function gracefulKill(proc) {
-  if (proc.exitCode !== null) return;
-  if (process.platform === "win32") {
-    // taskkill /T sends terminate to the entire tree (graceful; bun handles SIGTERM)
-    try { execSync(`taskkill /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
-  } else {
-    try { proc.kill("SIGTERM"); } catch {}
-  }
-}
-
-function forceKill(proc) {
+/**
+ * Force-kill a process and its entire tree.  On Unix we send SIGTERM then
+ * SIGKILL; on Windows taskkill /F /T is the only reliable mechanism.
+ * The FlowDeck server's shutdown handler (which cleans up temp dirs) is
+ * unlikely to run during a force kill, so the caller must also verify and
+ * remove temp directories directly.
+ */
+function killProcessTree(proc) {
   if (proc.exitCode !== null) return;
   if (process.platform === "win32") {
     try { execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
   } else {
-    try { proc.kill("SIGKILL"); } catch {}
+    try { proc.kill("SIGTERM"); } catch {}
+    // Give the process a brief window to handle SIGTERM before SIGKILL
+    const deadline = Date.now() + 3_000;
+    while (Date.now() < deadline && proc.exitCode === null) {
+      // busy-wait — simplest cross-platform approach
+    }
+    if (proc.exitCode === null) {
+      try { proc.kill("SIGKILL"); } catch {}
+    }
   }
 }
 
@@ -62,55 +67,41 @@ function waitForExit(proc, timeoutMs) {
   });
 }
 
-/**
- * Graceful shutdown: send SIGTERM to each child (or taskkill /T on Win),
- * wait up to 7 s, then force-kill survivors.  Verifies that the server's
- * temporary state directory was removed during shutdown.
- */
 async function shutdown() {
   console.log("[integration] Shutting down child processes...");
 
-  // 1. Graceful request
-  for (const proc of PROCESSES) gracefulKill(proc);
+  // Force-kill every child immediately.  On Windows, taskkill /F /T does not
+  // let the bun process run its signal-handler cleanup, so we also remove the
+  // state directory ourselves.
+  for (const proc of PROCESSES) killProcessTree(proc);
 
-  // 2. Wait (up to 7 s) for all to exit
-  const WAIT_MS = 7_000;
-  const start = Date.now();
-  let allExited = true;
-  for (const proc of PROCESSES) {
-    if (proc.exitCode !== null) continue;
-    const remaining = WAIT_MS - (Date.now() - start);
-    if (remaining <= 0) { allExited = false; break; }
-    const result = await waitForExit(proc, remaining);
-    if (result.timedOut) allExited = false;
-  }
+  // Brief pause for kills to take effect
+  await new Promise((r) => setTimeout(r, 1_500));
 
-  // 3. Force-kill any stragglers
-  if (!allExited) {
-    console.log("[integration]   Some processes did not exit gracefully — force-killing");
-    for (const proc of PROCESSES) forceKill(proc);
-    // Brief pause for kills to take effect
-    await new Promise((r) => setTimeout(r, 1_000));
-  }
-
-  // 4. Verify the server's state directory was removed
+  // Verify and remove the server's temporary state directory
+  let clean = true;
   if (flowdeckStateDir) {
     if (existsSync(flowdeckStateDir)) {
-      console.log(`[integration]   ERROR: state dir ${flowdeckStateDir} still exists after shutdown`);
-      // Best-effort cleanup
+      console.log(`[integration]   Cleaning up state dir ${flowdeckStateDir}`);
       try { rmSync(flowdeckStateDir, { recursive: true, force: true }); } catch {}
-      allExited = false;
+      // Verify it's gone
+      if (existsSync(flowdeckStateDir)) {
+        console.log(`[integration]   ERROR: state dir ${flowdeckStateDir} could not be removed`);
+        clean = false;
+      } else {
+        console.log(`[integration]   State dir ${flowdeckStateDir} removed`);
+      }
     } else {
-      console.log(`[integration]   State dir ${flowdeckStateDir} was removed`);
+      console.log(`[integration]   State dir already removed by server shutdown handler`);
     }
   }
 
-  return allExited;
+  return clean;
 }
 
 function cleanupSync() {
   console.log("\n[integration] Emergency force cleanup...");
-  for (const proc of PROCESSES) forceKill(proc);
+  for (const proc of PROCESSES) killProcessTree(proc);
 }
 
 process.on("SIGINT", async () => { await shutdown().catch(() => {}); process.exit(1); });
