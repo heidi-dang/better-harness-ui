@@ -26,7 +26,7 @@ const SHELL = process.platform === "win32";
 
 // ── Tracked processes and temp dirs for cleanup ─────────────────────────
 const PROCESSES = [];
-let flowdeckStateDir = null;   // set from CLI metadata, verified on shutdown
+let tempDirs = { projectDir: null, stateDir: null, eventLogDir: null };
 
 // ── Graceful-then-forced process termination ────────────────────────────
 /**
@@ -78,21 +78,21 @@ async function shutdown() {
   // Brief pause for kills to take effect
   await new Promise((r) => setTimeout(r, 1_500));
 
-  // Verify and remove the server's temporary state directory
+  // Verify and remove the server's temporary directories
   let clean = true;
-  if (flowdeckStateDir) {
-    if (existsSync(flowdeckStateDir)) {
-      console.log(`[integration]   Cleaning up state dir ${flowdeckStateDir}`);
-      try { rmSync(flowdeckStateDir, { recursive: true, force: true }); } catch {}
-      // Verify it's gone
-      if (existsSync(flowdeckStateDir)) {
-        console.log(`[integration]   ERROR: state dir ${flowdeckStateDir} could not be removed`);
+  for (const [name, dirPath] of Object.entries(tempDirs)) {
+    if (!dirPath) continue;
+    if (existsSync(dirPath)) {
+      console.log(`[integration]   Cleaning up ${name} ${dirPath}`);
+      try { rmSync(dirPath, { recursive: true, force: true }); } catch {}
+      if (existsSync(dirPath)) {
+        console.log(`[integration]   ERROR: ${name} ${dirPath} could not be removed`);
         clean = false;
       } else {
-        console.log(`[integration]   State dir ${flowdeckStateDir} removed`);
+        console.log(`[integration]   ${name} removed`);
       }
     } else {
-      console.log(`[integration]   State dir already removed by server shutdown handler`);
+      console.log(`[integration]   ${name} already removed`);
     }
   }
 
@@ -131,13 +131,19 @@ async function main() {
       throw new Error(`Failed to parse FlowDeck metadata: ${metadataLine}`);
     }
 
-    const baseUrl   = flowdeckMeta.baseUrl;
+    const baseUrl    = flowdeckMeta.baseUrl;
     const serverKey  = flowdeckMeta.serverKey;
     const projectKey = flowdeckMeta.projectKey;
-    flowdeckStateDir = flowdeckMeta.stateDir || null;
+    tempDirs = {
+      projectDir: flowdeckMeta.projectDir || null,
+      stateDir:   flowdeckMeta.stateDir || null,
+      eventLogDir: flowdeckMeta.eventLogDir || null,
+    };
     console.log(`[integration] FlowDeck server: ${baseUrl}`);
     console.log(`[integration]   key: ${serverKey} / ${projectKey}`);
-    if (flowdeckStateDir) console.log(`[integration]   stateDir: ${flowdeckStateDir}`);
+    for (const [name, dir] of Object.entries(tempDirs)) {
+      if (dir) console.log(`[integration]   ${name}: ${dir}`);
+    }
 
     // 2. Wait for health endpoint
     console.log("[integration] Waiting for health...");
