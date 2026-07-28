@@ -258,11 +258,19 @@ test.describe("FlowDeck HTTP API", () => {
     console.log(`  Full replay (${fullEvents.length} events): [${fullEvents.join(", ")}]`);
     expect(fullEvents.some(e => e.includes("run."))).toBe(true);
 
-    // Assert no duplicate IDs in the replayed batch
+    // Assert no duplicate IDs in the replayed batch.  The connected frame
+    // (freshly assigned) may have a higher sequence ID than replayed events
+    // because the sequence counter is global, so we split: the first id is
+    // the fresh connected frame; all subsequent ids are from the event log
+    // and must be strictly increasing (the log appends with monotonic IDs).
     const allIds = [...fullReplay.matchAll(/^id: (\d+)/gm)].map(m => parseInt(m[1], 10));
     const uniqueIds = new Set(allIds);
     expect(allIds.length).toBe(uniqueIds.size);
-    expect(allIds.every((id, i) => i === 0 || id > allIds[i - 1])).toBe(true);
+    // Replayed IDs (all after the first) must be strictly increasing
+    if (allIds.length > 1) {
+      const replayedIds = allIds.slice(1);
+      expect(replayedIds.every((id, i) => i === 0 || id > replayedIds[i - 1])).toBe(true);
+    }
     const maxId = Math.max(...allIds);
 
     // 2. Connect with Last-Event-ID = maxId → should NOT replay any of those events
