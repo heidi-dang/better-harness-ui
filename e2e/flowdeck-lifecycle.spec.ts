@@ -258,11 +258,13 @@ test.describe("FlowDeck HTTP API", () => {
     // ---- Full replay assertion ----
     const fullReplay = await readSSE("0");
 
-    // 1. Connected and heartbeat frames have no `id:` field
+    // 1. Exactly one connected frame, and it has no `id:` prefix.
+    //    In the raw data, durable events look like "id: N\nevent: ...",
+    //    while connected looks like "\nevent: connected" (no id line).
     const connectedLines = fullReplay.split("\n").filter(l => l.startsWith("event: connected"));
     expect(connectedLines.length).toBe(1);
-    const connectedBlock = fullReplay.split("\n\n")[0];
-    expect(connectedBlock).not.toMatch(/^id: /m);
+    // The connected frame should NOT be preceded by an "id: N" line
+    expect(fullReplay).not.toMatch(/\nid: \d+\nevent: connected/);
 
     // 2. Replayed durable events arrive before the connected frame.
     //    The connected frame must be the last event in the batch.
