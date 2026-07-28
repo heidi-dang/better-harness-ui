@@ -130,7 +130,12 @@ export function HarnessProvider({
   const progressUnsubscribeRef = useRef<(() => void) | null>(null);
   const progressPollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollingActiveRef = useRef(false);
+  const pollingErrorCountRef = useRef(0);
+  const activeRunIdRef = useRef<string | undefined>(undefined);
   const hasSelectedInitialFinding = useRef(false);
+
+  /** Maximum consecutive polling failures before surfacing an error. */
+  const MAX_POLLING_ERRORS = 5;
 
   /** Deterministic polling cleanup: stops polling timer and clears the ref. */
   const stopPolling = useCallback(() => {
@@ -139,6 +144,7 @@ export function HarnessProvider({
       progressPollingRef.current = null;
     }
     pollingActiveRef.current = false;
+    pollingErrorCountRef.current = 0;
   }, []);
 
   // Data source selection
@@ -169,7 +175,7 @@ export function HarnessProvider({
       }
 
       if (dataSource.getRunProgress) {
-        const prog = await dataSource.getRunProgress();
+        const prog = await dataSource.getRunProgress(activeRunIdRef.current);
         setProgress(prog);
       }
 
@@ -227,12 +233,15 @@ export function HarnessProvider({
   const startPollingFallback = useCallback(() => {
     if (pollingActiveRef.current) return;
     pollingActiveRef.current = true;
+    pollingErrorCountRef.current = 0;
 
     const poll = async () => {
       if (!pollingActiveRef.current) return;
 
       try {
-        const prog = await dataSource.getRunProgress?.();
+        const prog = await dataSource.getRunProgress?.(activeRunIdRef.current);
+        pollingErrorCountRef.current = 0; // reset on success
+
         if (prog) {
           setProgress(prog);
           if (prog.status === "completed" || prog.status === "failed" || prog.status === "cancelled") {
@@ -244,7 +253,16 @@ export function HarnessProvider({
         // prog === undefined (404/204) → keep polling
         // (run may still be initializing or was just cancelled)
       } catch {
-        // Request error → keep polling (but don't start overlapping loops)
+        pollingErrorCountRef.current++;
+        if (pollingErrorCountRef.current >= MAX_POLLING_ERRORS) {
+          // Surface visible error after persistent failure
+          stopPolling();
+          setActionMessage({
+            text: "Analysis progress check failed — backend may be unreachable.",
+            type: "warning",
+          });
+          return;
+        }
       }
 
       // Schedule next poll only after the current one resolves
@@ -254,7 +272,7 @@ export function HarnessProvider({
     };
 
     progressPollingRef.current = setTimeout(poll, 2000);
-  }, [dataSource, loadData, stopPolling]);
+  }, [dataSource, loadData, stopPolling, setActionMessage]);
 
   const regenerateAnalysis = useCallback(async () => {
     try {
@@ -268,6 +286,8 @@ export function HarnessProvider({
 
       const res = await dataSource.regenerate();
       if (res.accepted && res.runId) {
+        // Set the active run ID for exact-run polling
+        activeRunIdRef.current = res.runId;
         let sseSubscribed = false;
 
         // Subscribe to SSE progress if the data source supports it
@@ -288,6 +308,7 @@ export function HarnessProvider({
                 if (event.type === "report.completed" || event.type === "run.failed" || event.type === "run.cancelled") {
                   // Run finished — stop polling, unsubscribe, and reload
                   stopPolling();
+                  activeRunIdRef.current = undefined;
                   if (progressUnsubscribeRef.current) {
                     progressUnsubscribeRef.current();
                     progressUnsubscribeRef.current = null;
@@ -509,15 +530,33 @@ export function HarnessProvider({
     }
     setProgress(undefined);
 
-    await dataSource.cancel();
-    setActionMessage({
-      text: "Analysis cancelled.",
-      type: "info",
-    });
+    try {
+      await dataSource.cancel();
+      activeRunIdRef.current = undefined;
+      setActionMessage({
+        text: "Analysis cancelled.",
+        type: "info",
+      });
+    } catch (err) {
+      // Cancellation confirmed by backend — still show message
+      // but include the error context
+      if ((err as Error).message?.includes("empty")) {
+        setActionMessage({
+          text: "Cancel request completed, but backend returned empty — cancellation may not have been confirmed.",
+          type: "warning",
+        });
+      } else {
+        setActionMessage({
+          text: err instanceof Error ? err.message : "Cancellation request failed",
+          type: "warning",
+        });
+        return; // Don't reload on failure
+      }
+    }
     await loadData();
   }, [dataSource, loadData, stopPolling]);
 
-  // Clean up SSE subscription and polling on unmount
+  // Clean up SSE subscription, polling, and active run on unmount
   useEffect(() => {
     return () => {
       if (progressUnsubscribeRef.current) {
@@ -525,6 +564,7 @@ export function HarnessProvider({
         progressUnsubscribeRef.current = null;
       }
       stopPolling();
+      activeRunIdRef.current = undefined;
     };
   }, [stopPolling]);
 
