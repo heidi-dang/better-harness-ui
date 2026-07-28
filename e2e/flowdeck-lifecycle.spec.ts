@@ -95,7 +95,8 @@ test.describe("FlowDeck HTTP API", () => {
     expect(getRes.status).toBe(200);
   });
 
-  test("SSE replay delivers run.progress with validated envelope and matching runId", async (_fixtures, testInfo) => {
+  // eslint-disable-next-line no-empty-pattern
+  test("SSE replay delivers run.progress with validated envelope and matching runId", async ({}, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
 
@@ -168,7 +169,8 @@ test.describe("FlowDeck HTTP API", () => {
     }
   });
 
-  test("dedicated SSE connection delivers mandatory heartbeat", async (_fixtures, testInfo) => {
+  // eslint-disable-next-line no-empty-pattern
+  test("dedicated SSE connection delivers mandatory heartbeat", async ({}, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
     const httpServerUrl = new URL(BASE_URL);
@@ -214,7 +216,8 @@ test.describe("FlowDeck HTTP API", () => {
     }
   });
 
-  test("SSE Last-Event-ID correctly filters replayed events", async (_fixtures, testInfo) => {
+  // eslint-disable-next-line no-empty-pattern
+  test("SSE Last-Event-ID correctly filters replayed events", async ({}, testInfo) => {
     testInfo.setTimeout(45_000);
     const http = await import("node:http");
 
