@@ -24,15 +24,33 @@ const FLOWDECK_DIR = resolve(process.env.FLOWDECK_DIR || resolve(UI_DIR, "..", "
 const KEEP = process.env.KEEP_SERVERS === "true";
 const SHELL = process.platform === "win32";
 
-// ── Tracked processes for cleanup ───────────────────────────────────────
+// ── Tracked processes and temp dirs for cleanup ─────────────────────────
 const PROCESSES = [];
-let flowdeckTempDir = null; // set after FlowDeck start, verified on cleanup
+let flowdeckStateDir = null;   // set from CLI metadata, verified on shutdown
+
+// ── Graceful-then-forced process termination ────────────────────────────
+function gracefulKill(proc) {
+  if (proc.exitCode !== null) return;
+  if (process.platform === "win32") {
+    // taskkill /T sends terminate to the entire tree (graceful; bun handles SIGTERM)
+    try { execSync(`taskkill /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
+  } else {
+    try { proc.kill("SIGTERM"); } catch {}
+  }
+}
+
+function forceKill(proc) {
+  if (proc.exitCode !== null) return;
+  if (process.platform === "win32") {
+    try { execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
+  } else {
+    try { proc.kill("SIGKILL"); } catch {}
+  }
+}
 
 function waitForExit(proc, timeoutMs) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      resolve({ code: null, timedOut: true });
-    }, timeoutMs);
+    const timer = setTimeout(() => resolve({ code: null, timedOut: true }), timeoutMs);
     proc.on("close", (code) => {
       clearTimeout(timer);
       resolve({ code, timedOut: false });
@@ -45,81 +63,58 @@ function waitForExit(proc, timeoutMs) {
 }
 
 /**
- * Send SIGTERM to all tracked child processes and await their exit.
- * Returns a summary of which processes exited cleanly.
+ * Graceful shutdown: send SIGTERM to each child (or taskkill /T on Win),
+ * wait up to 7 s, then force-kill survivors.  Verifies that the server's
+ * temporary state directory was removed during shutdown.
  */
 async function shutdown() {
   console.log("[integration] Shutting down child processes...");
-  const signals = PROCESSES.map(async (proc, i) => {
-    const label = `process[${i}]`;
 
-    // If the process has already exited (e.g. Playwright finished), skip
-    if (proc.exitCode !== null) {
-      return { label, exited: true, alreadyExited: true, code: proc.exitCode };
-    }
+  // 1. Graceful request
+  for (const proc of PROCESSES) gracefulKill(proc);
 
-    killProcessTree(proc);
-    const result = await waitForExit(proc, 5_000);
-    if (result.timedOut) {
-      killProcessTree(proc); // Force kill
-      return { label, exited: false, timedOut: true };
-    }
-    return { label, exited: true, code: result.code };
-  });
-  const results = await Promise.all(signals);
-
+  // 2. Wait (up to 7 s) for all to exit
+  const WAIT_MS = 7_000;
+  const start = Date.now();
   let allExited = true;
-  for (const r of results) {
-    if (!r.exited || r.timedOut) {
-      console.log(`[integration]   ${r.label} did not exit cleanly`);
-      allExited = false;
-    }
-  }
-  if (allExited) {
-    console.log("[integration]   All child processes exited cleanly");
+  for (const proc of PROCESSES) {
+    if (proc.exitCode !== null) continue;
+    const remaining = WAIT_MS - (Date.now() - start);
+    if (remaining <= 0) { allExited = false; break; }
+    const result = await waitForExit(proc, remaining);
+    if (result.timedOut) allExited = false;
   }
 
-  // Verify temp directories were removed
-  if (flowdeckTempDir) {
-    const stillExists = existsSync(flowdeckTempDir);
-    if (stillExists) {
-      console.log(`[integration]   WARNING: temp dir ${flowdeckTempDir} still exists`);
-      try { rmSync(flowdeckTempDir, { recursive: true, force: true }); } catch {}
+  // 3. Force-kill any stragglers
+  if (!allExited) {
+    console.log("[integration]   Some processes did not exit gracefully — force-killing");
+    for (const proc of PROCESSES) forceKill(proc);
+    // Brief pause for kills to take effect
+    await new Promise((r) => setTimeout(r, 1_000));
+  }
+
+  // 4. Verify the server's state directory was removed
+  if (flowdeckStateDir) {
+    if (existsSync(flowdeckStateDir)) {
+      console.log(`[integration]   ERROR: state dir ${flowdeckStateDir} still exists after shutdown`);
+      // Best-effort cleanup
+      try { rmSync(flowdeckStateDir, { recursive: true, force: true }); } catch {}
+      allExited = false;
     } else {
-      console.log(`[integration]   Temp dir ${flowdeckTempDir} was removed`);
+      console.log(`[integration]   State dir ${flowdeckStateDir} was removed`);
     }
   }
 
   return allExited;
 }
 
-function killProcessTree(proc) {
-  // If the process already exited, skip
-  if (proc.exitCode !== null) return;
-  if (process.platform === "win32") {
-    // On Windows, kill the entire process tree via TaskKill.
-    // This handles shell:true cases where the actual child survives.
-    try { execSync(`taskkill /F /T /PID ${proc.pid}`, { stdio: "ignore" }); } catch {}
-  } else {
-    try { proc.kill("SIGKILL"); } catch {}
-  }
-}
-
 function cleanupSync() {
-  console.log(`\n[integration] Force cleanup...`);
-  for (const proc of PROCESSES) {
-    killProcessTree(proc);
-  }
+  console.log("\n[integration] Emergency force cleanup...");
+  for (const proc of PROCESSES) forceKill(proc);
 }
 
-process.on("SIGINT", async () => {
-  await shutdown().catch(() => {});
-  process.exit(1);
-});
-process.on("SIGTERM", async () => {
-  await shutdown().catch(() => {});
-  process.exit(1);
-});
+process.on("SIGINT", async () => { await shutdown().catch(() => {}); process.exit(1); });
+process.on("SIGTERM", async () => { await shutdown().catch(() => {}); process.exit(1); });
 
 // ── Main ────────────────────────────────────────────────────────────────
 async function main() {
@@ -128,10 +123,12 @@ async function main() {
   try {
     // 1. Spawn FlowDeck standalone server
     console.log("[integration] Starting FlowDeck standalone server...");
+
+    // On Windows we spawn via cmd /c for the bun.cmd shim.
     const flowdeckProc = spawn(
-      "bun run standalone:start",
-      [],
-      { cwd: FLOWDECK_DIR, stdio: ["ignore", "pipe", "pipe"], shell: SHELL },
+      SHELL ? "cmd" : "bun",
+      SHELL ? ["/c", "bun", "run", "standalone:start"] : ["run", "standalone:start"],
+      { cwd: FLOWDECK_DIR, stdio: ["ignore", "pipe", "pipe"] },
     );
     PROCESSES.push(flowdeckProc);
 
@@ -143,11 +140,13 @@ async function main() {
       throw new Error(`Failed to parse FlowDeck metadata: ${metadataLine}`);
     }
 
-    const baseUrl = flowdeckMeta.baseUrl;
-    const serverKey = flowdeckMeta.serverKey;
+    const baseUrl   = flowdeckMeta.baseUrl;
+    const serverKey  = flowdeckMeta.serverKey;
     const projectKey = flowdeckMeta.projectKey;
+    flowdeckStateDir = flowdeckMeta.stateDir || null;
     console.log(`[integration] FlowDeck server: ${baseUrl}`);
     console.log(`[integration]   key: ${serverKey} / ${projectKey}`);
+    if (flowdeckStateDir) console.log(`[integration]   stateDir: ${flowdeckStateDir}`);
 
     // 2. Wait for health endpoint
     console.log("[integration] Waiting for health...");
@@ -156,8 +155,8 @@ async function main() {
     // 3. Start Vite with FlowDeck API URL
     console.log("[integration] Starting Vite...");
     const viteProc = spawn(
-      "npx vite --port 0",
-      [],
+      SHELL ? "cmd" : "npx",
+      SHELL ? ["/c", "npx.cmd", "vite", "--port", "0"] : ["vite", "--port", "0"],
       {
         cwd: UI_DIR,
         stdio: ["ignore", "pipe", "pipe"],
@@ -167,7 +166,6 @@ async function main() {
           VITE_HARNESS_SERVER_KEY: serverKey,
           VITE_HARNESS_PROJECT_KEY: projectKey,
         },
-        shell: SHELL,
       },
     );
     PROCESSES.push(viteProc);
@@ -177,8 +175,6 @@ async function main() {
 
     // 4. Run Playwright tests
     console.log("[integration] Running Playwright tests...");
-
-    // Pass FlowDeck connection info to the Playwright process via env vars
     const playEnv = {
       ...process.env,
       FLOWDECK_BASE_URL: baseUrl,
@@ -188,27 +184,25 @@ async function main() {
     };
 
     const playResult = await spawnProcess(
-      "npx playwright test --config playwright.integration.config.ts",
-      [],
+      SHELL ? "cmd" : "npx",
+      SHELL
+        ? ["/c", "npx.cmd", "playwright", "test", "--config", "playwright.integration.config.ts"]
+        : ["playwright", "test", "--config", "playwright.integration.config.ts"],
       { cwd: UI_DIR, env: playEnv },
     );
 
     console.log(playResult.stdout);
-    if (playResult.stderr) {
-      console.error(playResult.stderr);
-    }
-
+    if (playResult.stderr) console.error(playResult.stderr);
     exitCode = playResult.code ?? 1;
   } catch (err) {
     console.error("[integration] Fatal:", err);
     exitCode = 1;
   } finally {
-    // 5. Deterministic cleanup — await child exits, verify temp dirs
     if (!KEEP) {
-      const allExited = await shutdown();
-      if (!allExited) {
-        console.log("[integration] WARNING: not all children exited — forcing exit");
-        cleanupSync();
+      const clean = await shutdown();
+      if (!clean) {
+        console.log("[integration] WARNING: cleanup incomplete — state dir may still exist");
+        exitCode = 1;
       }
     }
     process.exit(exitCode);
@@ -264,21 +258,13 @@ function parseVitePort(viteProc, timeoutMs) {
 
 function spawnProcess(cmd, args, opts = {}) {
   return new Promise((resolve, reject) => {
-    const proc = spawn(cmd, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: SHELL,
-      ...opts,
-    });
+    const proc = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"], ...opts });
     const stdout = [];
     const stderr = [];
     proc.stdout.on("data", (c) => stdout.push(c));
     proc.stderr.on("data", (c) => stderr.push(c));
     proc.on("close", (code) => {
-      resolve({
-        code,
-        stdout: Buffer.concat(stdout).toString(),
-        stderr: Buffer.concat(stderr).toString(),
-      });
+      resolve({ code, stdout: Buffer.concat(stdout).toString(), stderr: Buffer.concat(stderr).toString() });
     });
     proc.on("error", reject);
     PROCESSES.push(proc);
