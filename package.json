@@ -12,6 +12,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "test:e2e": "playwright test",
+    "test:integration:flowdeck": "node scripts/run-integration.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

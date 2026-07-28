@@ -16,10 +16,12 @@ import {
   validateHarnessReportResponse,
   validateHarnessReportArrayResponse,
   validateRunProgressResponse,
+  ValidatedHttpResult,
   SSEEnvelopeSchema,
   getPayloadValidator,
   type ValidatedHttpResult,
   type SSEEnvelope,
+  type SSESupportedEvent,
 } from "../schemas/harness-api";
 
 export interface HttpHarnessDataSourceConfig {
